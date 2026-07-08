@@ -1,0 +1,32 @@
+{
+  "protocol": "Quay EVM shared-liquidity propAMM",
+  "version": "hackathon-v1",
+  "chainId": 4663,
+  "amm": "0x0000000000000000000000000000000000000000",
+  "admin": "0x0000000000000000000000000000000000000000",
+  "makers": [
+    {
+      "makerId": 1,
+      "owner": "0x0000000000000000000000000000000000000000",
+      "updaters": [
+        "0x0000000000000000000000000000000000000000"
+      ]
+    }
+  ],
+  "books": [
+    {
+      "bookId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "pair": "WETH/USDG",
+      "token0": "0x0000000000000000000000000000000000000000",
+      "token1": "0x0000000000000000000000000000000000000000",
+      "makerId": 1,
+      "liquidityGroups": {
+        "token0": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "token1": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "quoteFunction": "quoteExactInput(bytes32,address,uint256)",
+      "swapFunction": "swapExactInputSingle((bytes32,address,address,uint256,uint256,address,uint64,uint64,uint64))",
+      "permit2": false
+    }
+  ]
+}
