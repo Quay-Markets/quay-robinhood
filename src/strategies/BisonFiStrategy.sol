@@ -203,9 +203,15 @@ contract BisonFiStrategy is IQuayStrategy, ConfigurableStrategy {
 
         // Signed total: negative ladder offsets may push factor above PPB
         // (price improvement past a tier boundary), matching the binary.
+        // casting to 'int256' is safe: constantPpb <= (2*uint32.max)*100_000/256 << 2^255
+        // forge-lint: disable-next-line(unsafe-typecast)
         int256 totalPpb = int256(constantPpb) + _ladderPpm(sc, p.ratioPpm) * 1000;
+        // casting to 'int256' is safe: PPB is the constant 1e9
+        // forge-lint: disable-next-line(unsafe-typecast)
         int256 factorNum = int256(PPB) - totalPpb;
         if (factorNum <= 0) return (0, 0, 0, QuoteReason.InsufficientLiquidity);
+        // casting to 'uint256' is safe: factorNum > 0 was checked above
+        // forge-lint: disable-next-line(unsafe-typecast)
         uint256 factor = uint256(factorNum);
 
         // Single fused floor division per side, as the original settles.
@@ -238,6 +244,9 @@ contract BisonFiStrategy is IQuayStrategy, ConfigurableStrategy {
         for (uint256 i = 0; i < tiers; i++) {
             Tier storage t = sc.ladder[i];
             if (ratioPpm < t.thresholdRatioPpm) break; // sorted ascending
+            // casting to 'int256' is safe: int64 widens; (ratioPpm - T) fits
+            // uint64 after the threshold check; PPM is the constant 1e6
+            // forge-lint: disable-next-line(unsafe-typecast)
             spread += (int256(t.slopePpm) * int256(ratioPpm - t.thresholdRatioPpm)) / int256(PPM)
                 + t.offsetPpm;
         }

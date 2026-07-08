@@ -7,6 +7,8 @@ evm_version = "cancun"
 optimizer = true
 optimizer_runs = 10_000
 deny = "warnings"
+# Lets the SDK vector generator (test/SdkVectors.t.sol) refresh sdk/test-vectors.json
+fs_permissions = [{ access = "write", path = "./sdk/test-vectors.json" }]
 
 [lint]
 # block.timestamp comparisons are core to the design: quote freshness, decay,

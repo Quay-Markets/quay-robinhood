@@ -629,7 +629,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
     }
 
     function quoteBestExactInput(address tokenIn, address tokenOut, uint256 amountIn)
-        external
+        public
         view
         returns (QuoteResult memory best)
     {
@@ -696,6 +696,60 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
 
     function getBook(bytes32 bookId) external view returns (Book memory) {
         return books[bookId];
+    }
+
+    /// @notice Minimal aggregator-shaped quote: token addresses + amount in,
+    ///         amount out back. Scans every book for the pair and returns the
+    ///         best fillable quote (0 if none). Pair with swapExactInputSingle
+    ///         on the returned bookId; funds move via plain ERC-20
+    ///         transferFrom — no Permit2.
+    function getAmountOut(address tokenIn, address tokenOut, uint256 amountIn)
+        external
+        view
+        returns (uint256 amountOut, bytes32 bookId)
+    {
+        QuoteResult memory best = quoteBestExactInput(tokenIn, tokenOut, amountIn);
+        if (best.valid) return (best.amountOut, best.bookId);
+        return (0, bytes32(0));
+    }
+
+    /// @notice Everything an off-chain SDK needs to price a book, in one call.
+    struct BookStateView {
+        Book book;
+        QuoteState quote;
+        OracleConfig oracle;
+        StrategyStatus strategyStatus;
+        bool groupPaused;
+        bool protocolPaused;
+        uint256 inventory0;
+        uint256 inventory1;
+        uint64 inventoryNonce0;
+        uint64 inventoryNonce1;
+    }
+
+    function getBookState(bytes32 bookId) public view returns (BookStateView memory v) {
+        Book storage b = books[bookId];
+        v.book = b;
+        v.quote = quoteStates[bookId];
+        v.oracle = oracleConfigs[bookId];
+        v.strategyStatus = strategies[b.strategyModule].status;
+        v.groupPaused = liquidityGroups[b.liquidityGroupId].paused;
+        v.protocolPaused = paused();
+        v.inventory0 = inventory[b.liquidityGroupId][b.token0];
+        v.inventory1 = inventory[b.liquidityGroupId][b.token1];
+        v.inventoryNonce0 = inventoryNonce[b.liquidityGroupId][b.token0];
+        v.inventoryNonce1 = inventoryNonce[b.liquidityGroupId][b.token1];
+    }
+
+    function getBookStates(bytes32[] calldata bookIds)
+        external
+        view
+        returns (BookStateView[] memory views)
+    {
+        views = new BookStateView[](bookIds.length);
+        for (uint256 i = 0; i < bookIds.length; i++) {
+            views[i] = getBookState(bookIds[i]);
+        }
     }
 
     // ---------------------------------------------------------------------
