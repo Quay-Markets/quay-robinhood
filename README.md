@@ -58,6 +58,27 @@ gas-burning module degrades to a `StrategyError` quote reason).
 `src/strategies/BBOStrategy.sol` is the default: posted bid/ask with linear
 staleness decay and per-side size caps.
 
+Reference ports of the Solana prop-AMM pricing models researched in
+quay-monorepo `onchain/vm/research/` (structural ports — same curve shapes and
+rejection semantics, EVM-native fixed point):
+
+```text
+SolFiStrategy      piecewise-linear spline, <=8 points per side, saturating
+                   (x[0]=0, x strictly increasing, y monotone) — the spline IS
+                   the curve; makers reprice by rewriting it
+HumidiFiStrategy   keeper-pushed mid (QuoteState.bidPxX128) + smooth spread
+                   base + isqrt(out/sqrtDiv) + out/linDiv in 1e-8 units,
+                   discrete tier kick, 40bps-style cap, circuit breaker
+BisonFiStrategy    mid + freshness haircut (ppm/second off q.updatedAt, hard
+                   staleness gate) + per-side constant spread
+                   max(field,floor)*100/256 ppm + additive tier ladder on the
+                   fill ratio out/availableOut, ~0.7 ratio rejection
+```
+
+These extend `ConfigurableStrategy`: slow-moving curve parameters are stored
+per book in the module (settable only by the book's group owner, evented),
+while the fast path (mid, size caps, freshness) flows through updateQuote.
+
 Governance is three-tier and enforced at quote time:
 
 ```text

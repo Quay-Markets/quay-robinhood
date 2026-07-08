@@ -16,6 +16,8 @@ import {QuayTypes} from "src/QuayTypes.sol";
 ///   - Return reason != OK (with amountOut = 0) for module-level rejections
 ///     such as size caps or unusable price params; do not revert for those.
 interface IQuayStrategy {
+    /// @param bookId venue book being quoted; modules holding per-book curve
+    ///        configuration key it by this id
     /// @param q maker-posted quote parameters for the book
     /// @param token0In true when the taker sells token0 for token1
     /// @param amountIn gross taker input (before the venue's protocol fee)
@@ -28,6 +30,7 @@ interface IQuayStrategy {
     /// @return appliedDecayBps decay applied to the posted price, for diagnostics
     /// @return reason OK or a module-level rejection reason
     function quoteExactInput(
+        bytes32 bookId,
         QuayTypes.QuoteState calldata q,
         bool token0In,
         uint256 amountIn,

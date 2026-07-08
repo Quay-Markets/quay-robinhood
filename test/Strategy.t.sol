@@ -274,6 +274,7 @@ contract StrategyTest is QuayTestBase {
 /// @dev Ignores posted quote params: token0 -> token1 doubles, reverse halves.
 contract FixedDoubleStrategy is IQuayStrategy {
     function quoteExactInput(
+        bytes32,
         QuayTypes.QuoteState calldata,
         bool token0In,
         uint256,
@@ -286,21 +287,27 @@ contract FixedDoubleStrategy is IQuayStrategy {
 }
 
 contract RevertingStrategy is IQuayStrategy {
-    function quoteExactInput(QuayTypes.QuoteState calldata, bool, uint256, uint256, uint256)
-        external
-        pure
-        returns (uint256, uint256, uint32, QuayTypes.QuoteReason)
-    {
+    function quoteExactInput(
+        bytes32,
+        QuayTypes.QuoteState calldata,
+        bool,
+        uint256,
+        uint256,
+        uint256
+    ) external pure returns (uint256, uint256, uint32, QuayTypes.QuoteReason) {
         revert("strategy broken");
     }
 }
 
 contract GasBurnStrategy is IQuayStrategy {
-    function quoteExactInput(QuayTypes.QuoteState calldata, bool, uint256, uint256, uint256)
-        external
-        view
-        returns (uint256, uint256, uint32, QuayTypes.QuoteReason)
-    {
+    function quoteExactInput(
+        bytes32,
+        QuayTypes.QuoteState calldata,
+        bool,
+        uint256,
+        uint256,
+        uint256
+    ) external view returns (uint256, uint256, uint32, QuayTypes.QuoteReason) {
         // Burns the entire gas stipend: keccak never yields exactly zero in
         // practice, so this loop only ends by running out of gas.
         uint256 x = block.timestamp;
@@ -314,6 +321,7 @@ contract GasBurnStrategy is IQuayStrategy {
 /// @dev Proves modules receive read-only inventory context.
 contract EchoInventoryStrategy is IQuayStrategy {
     function quoteExactInput(
+        bytes32,
         QuayTypes.QuoteState calldata,
         bool,
         uint256,

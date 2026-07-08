@@ -839,7 +839,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         // the quoter.
         // slither-disable-next-line calls-loop
         try IQuayStrategy(b.strategyModule).quoteExactInput{gas: STRATEGY_GAS_CAP}(
-            q, token0In, amountIn, r.netAmountIn, inventory[b.liquidityGroupId][r.tokenOut]
+            bookId, q, token0In, amountIn, r.netAmountIn, inventory[b.liquidityGroupId][r.tokenOut]
         ) returns (
             uint256 amountOut,
             uint256 appliedPriceX128,

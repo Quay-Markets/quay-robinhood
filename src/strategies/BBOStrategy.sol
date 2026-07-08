@@ -17,6 +17,7 @@ import {IQuayStrategy} from "src/interfaces/IQuayStrategy.sol";
 ///   maxDecayBps            decay ceiling
 contract BBOStrategy is IQuayStrategy, QuayTypes {
     function quoteExactInput(
+        bytes32, /* bookId: BBO keeps no per-book config */
         QuoteState calldata q,
         bool token0In,
         uint256 amountIn,
