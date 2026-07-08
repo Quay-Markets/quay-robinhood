@@ -8,6 +8,9 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {AggregatorV3Interface} from "src/interfaces/AggregatorV3Interface.sol";
 
 /// @title QuaySharedLiquidityAMM
 /// @notice Standalone propAMM venue with:
@@ -32,12 +35,18 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 ///   No tx.origin, block.coinbase, tx.gasprice, block.basefee, or gasleft().
 ///   block.timestamp is used only for quote freshness/decay/expiry.
 ///   Pricing never depends on msg.sender or recipient.
-contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard {
+contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
 
     uint256 public constant Q128 = 1 << 128;
     uint16 public constant BPS = 10_000;
     uint32 public constant MAX_DECAY_BPS = 9999;
+
+    /// @notice EIP-712 type for relayed quote updates. `updatedAt` is excluded
+    ///         because the contract always stamps it with block.timestamp.
+    bytes32 public constant QUOTE_UPDATE_TYPEHASH = keccak256(
+        "QuoteUpdate(bytes32 bookId,uint64 nonce,uint64 freshUntil,uint64 validUntil,uint32 decayBpsPerSecond,uint32 maxDecayBps,uint256 bidPxX128,uint256 askPxX128,uint128 maxIn0,uint128 maxIn1,bytes32 sourceHash)"
+    );
 
     enum BookStatus {
         Uninitialized,
@@ -60,7 +69,10 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard {
         SizeExceeded,
         ZeroOutput,
         InsufficientLiquidity,
-        ProtocolPaused
+        ProtocolPaused,
+        OracleInvalid,
+        OracleStale,
+        OracleDeviation
     }
 
     struct LiquidityGroup {
@@ -114,6 +126,17 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard {
         uint64 inventoryNonceOut;
     }
 
+    /// @notice Optional per-book price guardrail against a Chainlink-style feed.
+    /// @dev refPxX128 = feed answer * priceScale, where priceScale is chosen at
+    ///      config time as Q128 * 10^token1Decimals / (10^feedDecimals * 10^token0Decimals)
+    ///      so the reference lands in the book's token1-atoms-per-token0-atom units.
+    struct OracleConfig {
+        address feed; // address(0) disables the guard
+        uint32 maxAge; // max seconds since the feed's updatedAt
+        uint16 maxDeviationBps; // allowed |quote mid - ref| relative to ref
+        uint256 priceScale;
+    }
+
     struct SwapExactInputSingleParams {
         bytes32 bookId;
         address tokenIn;
@@ -141,6 +164,8 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Incremented when inventory for a group/token mutates.
     mapping(bytes32 liquidityGroupId => mapping(address token => uint64)) public inventoryNonce;
 
+    mapping(bytes32 bookId => OracleConfig) public oracleConfigs;
+
     mapping(bytes32 bookId => mapping(address updater => bool)) public isUpdater;
     mapping(bytes32 bookId => mapping(address updater => bool)) private updaterSeen;
     mapping(bytes32 bookId => address[]) private updaterList;
@@ -164,6 +189,13 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard {
         bytes32 indexed bookId, BookStatus oldStatus, BookStatus newStatus, address indexed actor
     );
     event UpdaterSet(bytes32 indexed bookId, address indexed updater, bool active);
+    event BookOracleSet(
+        bytes32 indexed bookId,
+        address indexed feed,
+        uint32 maxAge,
+        uint16 maxDeviationBps,
+        uint256 priceScale
+    );
 
     event QuoteUpdated(
         bytes32 indexed bookId,
@@ -222,6 +254,8 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard {
     error NotUpdater();
     error BadFee();
     error BadQuote();
+    error BadOracleConfig();
+    error ArrayLengthMismatch();
     error StaleQuoteNonce();
     error DeadlineExpired();
     error QuoteInvalid(QuoteReason reason);
@@ -232,7 +266,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard {
     error InsufficientInventory();
     error NonStandardToken();
 
-    constructor(address owner_) Ownable(owner_) {}
+    constructor(address owner_) Ownable(owner_) EIP712("QuaySharedLiquidityAMM", "1") {}
 
     // ---------------------------------------------------------------------
     // Admin / setup
@@ -330,6 +364,27 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard {
         _setUpdater(bookId, updater, active);
     }
 
+    /// @notice Attach or detach a reference-price guard for a book.
+    ///         While attached, quoting requires a fresh, positive feed answer
+    ///         whose scaled price is within maxDeviationBps of the quote mid.
+    function setBookOracle(
+        bytes32 bookId,
+        address feed,
+        uint32 maxAge,
+        uint16 maxDeviationBps,
+        uint256 priceScale
+    ) external onlyBookGroupOwnerOrProtocol(bookId) {
+        if (feed != address(0)) {
+            bool badParams = maxAge == 0 || priceScale == 0 || maxDeviationBps == 0
+                || maxDeviationBps > BPS || feed.code.length == 0;
+            if (badParams) revert BadOracleConfig();
+        }
+        oracleConfigs[bookId] = OracleConfig({
+            feed: feed, maxAge: maxAge, maxDeviationBps: maxDeviationBps, priceScale: priceScale
+        });
+        emit BookOracleSet(bookId, feed, maxAge, maxDeviationBps, priceScale);
+    }
+
     function _setUpdater(bytes32 bookId, address updater, bool active) internal {
         if (updater == address(0)) revert InvalidAddress();
         if (books[bookId].status == BookStatus.Uninitialized) revert InvalidBook();
@@ -397,8 +452,63 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard {
     // Quote updates
     // ---------------------------------------------------------------------
 
+    /// @notice Direct quote update by an authorized updater EOA.
     function updateQuote(bytes32 bookId, QuoteState calldata q) external {
         if (!isUpdater[bookId][msg.sender]) revert NotUpdater();
+        _validateAndStoreQuote(bookId, q);
+    }
+
+    /// @notice Relay a quote update signed (EIP-712) by an authorized updater.
+    ///         Anyone can submit; replay is blocked by the strictly increasing
+    ///         per-book quote nonce and the domain separator.
+    function updateQuoteWithSig(bytes32 bookId, QuoteState calldata q, bytes calldata signature)
+        external
+    {
+        address signer = ECDSA.recover(hashQuoteUpdate(bookId, q), signature);
+        if (!isUpdater[bookId][signer]) revert NotUpdater();
+        _validateAndStoreQuote(bookId, q);
+    }
+
+    /// @notice Relay several signed quote updates in one transaction.
+    function batchUpdateQuotesWithSig(
+        bytes32[] calldata bookIds,
+        QuoteState[] calldata quotes,
+        bytes[] calldata signatures
+    ) external {
+        if (bookIds.length != quotes.length || bookIds.length != signatures.length) {
+            revert ArrayLengthMismatch();
+        }
+        for (uint256 i = 0; i < bookIds.length; i++) {
+            address signer = ECDSA.recover(hashQuoteUpdate(bookIds[i], quotes[i]), signatures[i]);
+            if (!isUpdater[bookIds[i]][signer]) revert NotUpdater();
+            _validateAndStoreQuote(bookIds[i], quotes[i]);
+        }
+    }
+
+    /// @notice EIP-712 digest an updater must sign for updateQuoteWithSig.
+    ///         q.updatedAt is not part of the digest; the contract stamps it.
+    function hashQuoteUpdate(bytes32 bookId, QuoteState calldata q) public view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    QUOTE_UPDATE_TYPEHASH,
+                    bookId,
+                    q.nonce,
+                    q.freshUntil,
+                    q.validUntil,
+                    q.decayBpsPerSecond,
+                    q.maxDecayBps,
+                    q.bidPxX128,
+                    q.askPxX128,
+                    q.maxIn0,
+                    q.maxIn1,
+                    q.sourceHash
+                )
+            )
+        );
+    }
+
+    function _validateAndStoreQuote(bytes32 bookId, QuoteState calldata q) internal {
         if (books[bookId].status == BookStatus.Uninitialized) revert InvalidBook();
         if (q.bidPxX128 == 0 || q.askPxX128 < q.bidPxX128) revert BadQuote();
         if (q.freshUntil > q.validUntil) revert BadQuote();
@@ -635,6 +745,12 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard {
             return _invalid(r, QuoteReason.BadPrices);
         }
 
+        OracleConfig storage oc = oracleConfigs[bookId];
+        if (oc.feed != address(0)) {
+            QuoteReason oracleReason = _checkOracle(oc, q);
+            if (oracleReason != QuoteReason.OK) return _invalid(r, oracleReason);
+        }
+
         if (token0In && amountIn > uint256(q.maxIn0)) return _invalid(r, QuoteReason.SizeExceeded);
         if (!token0In && amountIn > uint256(q.maxIn1)) {
             return _invalid(r, QuoteReason.SizeExceeded);
@@ -668,6 +784,46 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard {
 
         r.valid = true;
         r.reason = QuoteReason.OK;
+    }
+
+    /// @dev Compares the undecayed quote midpoint against the scaled feed price.
+    ///      Returns a QuoteReason instead of reverting so the quoter stays
+    ///      non-reverting for aggregators.
+    function _checkOracle(OracleConfig storage oc, QuoteState storage q)
+        internal
+        view
+        returns (QuoteReason)
+    {
+        // roundId/startedAt/answeredInRound are unused by design; staleness is
+        // enforced through updatedAt + maxAge instead of round accounting.
+        // slither-disable-next-line unused-return,calls-loop
+        try AggregatorV3Interface(oc.feed).latestRoundData() returns (
+            uint80, int256 answer, uint256, uint256 feedUpdatedAt, uint80
+        ) {
+            if (answer <= 0) return QuoteReason.OracleInvalid;
+            if (block.timestamp > feedUpdatedAt + oc.maxAge) return QuoteReason.OracleStale;
+
+            // casting to 'uint256' is safe: answer > 0 was checked above
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint256 unsignedAnswer = uint256(answer);
+            if (unsignedAnswer > type(uint256).max / oc.priceScale) {
+                return QuoteReason.OracleInvalid;
+            }
+            uint256 refPxX128 = unsignedAnswer * oc.priceScale;
+            if (refPxX128 == 0) return QuoteReason.OracleInvalid;
+
+            // Half-then-add avoids overflow; the at-most-1 rounding loss is
+            // negligible against Q128 price magnitudes.
+            uint256 midPxX128 = q.bidPxX128 / 2 + q.askPxX128 / 2;
+            uint256 deviation =
+                midPxX128 > refPxX128 ? midPxX128 - refPxX128 : refPxX128 - midPxX128;
+            if (deviation > Math.mulDiv(refPxX128, oc.maxDeviationBps, BPS)) {
+                return QuoteReason.OracleDeviation;
+            }
+            return QuoteReason.OK;
+        } catch {
+            return QuoteReason.OracleInvalid;
+        }
     }
 
     function _appliedDecayBps(QuoteState storage q) internal view returns (uint32) {

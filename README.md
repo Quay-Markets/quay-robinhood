@@ -22,6 +22,11 @@ forge test           # unit + fuzz + invariant suites (test/)
 forge fmt            # format
 prek run             # pre-commit hooks: forge fmt --check && forge test
 QUAY_OWNER=0x... forge script script/Deploy.s.sol --rpc-url $RPC --broadcast
+
+# static analysis (slither.config.json excludes timestamp/incorrect-equality/
+# calls-loop: quote decay is timestamp-driven by design, enum sentinels use
+# strict equality, and the batch/best-of view quoters loop over trusted feeds)
+uvx --python 3.12 --from slither-analyzer --with 'cbor2<6' slither .
 ```
 
 Test layout:
@@ -33,9 +38,30 @@ test/QuoteUpdate.t.sol      updater auth + quote validation rules
 test/QuoteView.t.sol        quote math, decay, expiry, every invalid reason code
 test/Swap.t.sol             settlement, slippage/nonce/deadline guards, hostile tokens
 test/SharedLiquidity.t.sol  shared-group fillability vs. independent pricing
+test/QuoteUpdateSig.t.sol   EIP-712 relayed quote updates (digest pinning, replay, batch)
+test/Oracle.t.sol           per-book reference-price guardrails
 test/Fuzz.t.sol             property tests (round-trip no-profit, decay monotone, fees)
 test/Invariant.t.sol        solvency: balances == inventory + fees under random actions
 ```
+
+## Signed quote updates
+
+Updaters can push quotes directly (`updateQuote`) or sign an EIP-712 `QuoteUpdate`
+payload that anyone may relay (`updateQuoteWithSig`, `batchUpdateQuotesWithSig`).
+Domain: `name = "QuaySharedLiquidityAMM"`, `version = "1"`. The digest to sign is
+exactly `hashQuoteUpdate(bookId, quote)`; `updatedAt` is excluded because the
+contract stamps it with `block.timestamp`. Replay is blocked by the strictly
+increasing per-book quote nonce.
+
+## Oracle guardrails
+
+`setBookOracle(bookId, feed, maxAge, maxDeviationBps, priceScale)` attaches an
+optional Chainlink-style sanity guard to a book. While attached, quoting requires
+a positive feed answer no older than `maxAge`, and the undecayed quote midpoint
+must stay within `maxDeviationBps` of `answer * priceScale`. Pick `priceScale`
+off-chain as `2^128 * 10^token1Decimals / (10^feedDecimals * 10^token0Decimals)`
+so the reference lands in the book's price units. Violations surface as
+`OracleInvalid`, `OracleStale`, or `OracleDeviation` quote reasons; swaps revert.
 
 ## Components
 
