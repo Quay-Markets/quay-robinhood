@@ -3,10 +3,11 @@ pragma solidity ^0.8.24;
 
 import {QuayTestBase} from "test/utils/QuayTestBase.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
+import {QuayTypes} from "src/QuayTypes.sol";
 
 contract QuoteUpdateTest is QuayTestBase {
     function test_UpdateQuote_StoresStateAndEmits() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         q.updatedAt = 123; // must be ignored and replaced by block.timestamp
 
         vm.expectEmit(true, false, false, true, address(amm));
@@ -25,7 +26,7 @@ contract QuoteUpdateTest is QuayTestBase {
         vm.prank(updater);
         amm.updateQuote(wethBook, q);
 
-        QuaySharedLiquidityAMM.QuoteState memory s = amm.getQuoteState(wethBook);
+        QuayTypes.QuoteState memory s = amm.getQuoteState(wethBook);
         assertEq(s.nonce, 2);
         assertEq(s.updatedAt, uint64(block.timestamp));
         assertEq(s.freshUntil, q.freshUntil);
@@ -60,7 +61,7 @@ contract QuoteUpdateTest is QuayTestBase {
     }
 
     function test_UpdateQuote_RevertZeroBid() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         q.bidPxX128 = 0;
         vm.prank(updater);
         vm.expectRevert(QuaySharedLiquidityAMM.BadQuote.selector);
@@ -68,7 +69,7 @@ contract QuoteUpdateTest is QuayTestBase {
     }
 
     function test_UpdateQuote_RevertAskBelowBid() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         q.askPxX128 = q.bidPxX128 - 1;
         vm.prank(updater);
         vm.expectRevert(QuaySharedLiquidityAMM.BadQuote.selector);
@@ -76,7 +77,7 @@ contract QuoteUpdateTest is QuayTestBase {
     }
 
     function test_UpdateQuote_ZeroSpreadAllowed() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         q.askPxX128 = q.bidPxX128;
         vm.prank(updater);
         amm.updateQuote(wethBook, q);
@@ -84,7 +85,7 @@ contract QuoteUpdateTest is QuayTestBase {
     }
 
     function test_UpdateQuote_RevertFreshAfterValid() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         q.freshUntil = q.validUntil + 1;
         vm.prank(updater);
         vm.expectRevert(QuaySharedLiquidityAMM.BadQuote.selector);
@@ -92,7 +93,7 @@ contract QuoteUpdateTest is QuayTestBase {
     }
 
     function test_UpdateQuote_RevertAlreadyExpired() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         q.freshUntil = uint64(block.timestamp) - 5;
         q.validUntil = uint64(block.timestamp) - 1;
         vm.prank(updater);
@@ -101,7 +102,7 @@ contract QuoteUpdateTest is QuayTestBase {
     }
 
     function test_UpdateQuote_ValidUntilNowAllowed() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         q.freshUntil = uint64(block.timestamp);
         q.validUntil = uint64(block.timestamp);
         vm.prank(updater);
@@ -109,7 +110,7 @@ contract QuoteUpdateTest is QuayTestBase {
     }
 
     function test_UpdateQuote_RevertDecayCapTooHigh() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         q.maxDecayBps = 10_000;
         vm.prank(updater);
         vm.expectRevert(QuaySharedLiquidityAMM.BadQuote.selector);
@@ -134,7 +135,7 @@ contract QuoteUpdateTest is QuayTestBase {
     }
 
     function test_UpdateQuote_RevertZeroMaxIn() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         q.maxIn0 = 0;
         vm.prank(updater);
         vm.expectRevert(QuaySharedLiquidityAMM.BadQuote.selector);

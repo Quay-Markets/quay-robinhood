@@ -3,6 +3,8 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
+import {QuayTypes} from "src/QuayTypes.sol";
+import {BBOStrategy} from "src/strategies/BBOStrategy.sol";
 import {MockERC20} from "test/utils/MockERC20.sol";
 
 /// @dev Shared fixture: one liquidity group owned by `maker`, a fee-charging
@@ -32,6 +34,7 @@ abstract contract QuayTestBase is Test {
     uint64 internal constant VALID_SECONDS = 10;
 
     QuaySharedLiquidityAMM internal amm;
+    BBOStrategy internal bbo;
     MockERC20 internal weth;
     MockERC20 internal usdc;
     MockERC20 internal cbbtc;
@@ -66,15 +69,25 @@ abstract contract QuayTestBase is Test {
         ASK_WETH = (2001e6 * Q128) / 1e18;
 
         amm = new QuaySharedLiquidityAMM(protocolOwner);
+        bbo = new BBOStrategy();
 
         vm.startPrank(protocolOwner);
+        amm.registerStrategy(address(bbo));
+        amm.setStrategyApproval(address(bbo), true);
         amm.createLiquidityGroup(GROUP_MAIN, maker);
         amm.createLiquidityGroup(GROUP_MATH, maker);
         wethBook = amm.createBook(
-            address(weth), address(usdc), GROUP_MAIN, bytes32("WETHUSDC"), FEE_BPS, updater
+            address(weth),
+            address(usdc),
+            GROUP_MAIN,
+            bytes32("WETHUSDC"),
+            FEE_BPS,
+            address(bbo),
+            updater
         );
-        mathBook =
-            amm.createBook(address(math0), address(math1), GROUP_MATH, bytes32("MATH"), 0, updater);
+        mathBook = amm.createBook(
+            address(math0), address(math1), GROUP_MATH, bytes32("MATH"), 0, address(bbo), updater
+        );
         vm.stopPrank();
 
         _deposit(GROUP_MAIN, weth, 100e18);
@@ -98,12 +111,8 @@ abstract contract QuayTestBase is Test {
         vm.stopPrank();
     }
 
-    function _wethQuote(uint64 nonce)
-        internal
-        view
-        returns (QuaySharedLiquidityAMM.QuoteState memory)
-    {
-        return QuaySharedLiquidityAMM.QuoteState({
+    function _wethQuote(uint64 nonce) internal view returns (QuayTypes.QuoteState memory) {
+        return QuayTypes.QuoteState({
             nonce: nonce,
             updatedAt: 0, // overwritten by the contract
             freshUntil: uint64(block.timestamp) + FRESH_SECONDS,
@@ -118,12 +127,8 @@ abstract contract QuayTestBase is Test {
         });
     }
 
-    function _mathQuote(uint64 nonce)
-        internal
-        view
-        returns (QuaySharedLiquidityAMM.QuoteState memory)
-    {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(nonce);
+    function _mathQuote(uint64 nonce) internal view returns (QuayTypes.QuoteState memory) {
+        QuayTypes.QuoteState memory q = _wethQuote(nonce);
         q.bidPxX128 = BID_MATH;
         q.askPxX128 = ASK_MATH;
         q.maxIn0 = 10_000e18;
@@ -131,7 +136,7 @@ abstract contract QuayTestBase is Test {
         return q;
     }
 
-    function _pushQuote(bytes32 bookId, QuaySharedLiquidityAMM.QuoteState memory q) internal {
+    function _pushQuote(bytes32 bookId, QuayTypes.QuoteState memory q) internal {
         vm.prank(updater);
         amm.updateQuote(bookId, q);
     }

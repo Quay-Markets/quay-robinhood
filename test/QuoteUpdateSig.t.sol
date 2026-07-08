@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {QuayTestBase} from "test/utils/QuayTestBase.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
+import {QuayTypes} from "src/QuayTypes.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 contract QuoteUpdateSigTest is QuayTestBase {
@@ -18,7 +19,7 @@ contract QuoteUpdateSigTest is QuayTestBase {
         amm.setUpdater(wethBook, signer, true);
     }
 
-    function _sign(bytes32 bookId, QuaySharedLiquidityAMM.QuoteState memory q, uint256 key)
+    function _sign(bytes32 bookId, QuayTypes.QuoteState memory q, uint256 key)
         internal
         view
         returns (bytes memory)
@@ -32,7 +33,7 @@ contract QuoteUpdateSigTest is QuayTestBase {
     // ------------------------------------------------------------------
 
     function test_DigestMatchesManualEip712Computation() public view {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
 
         bytes32 domainSeparator = keccak256(
             abi.encode(
@@ -71,13 +72,13 @@ contract QuoteUpdateSigTest is QuayTestBase {
     // ------------------------------------------------------------------
 
     function test_RelayedUpdateBySignedUpdater() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         bytes memory sig = _sign(wethBook, q, signerKey);
 
         vm.prank(relayer); // arbitrary submitter
         amm.updateQuoteWithSig(wethBook, q, sig);
 
-        QuaySharedLiquidityAMM.QuoteState memory s = amm.getQuoteState(wethBook);
+        QuayTypes.QuoteState memory s = amm.getQuoteState(wethBook);
         assertEq(s.nonce, 2);
         assertEq(s.bidPxX128, q.bidPxX128);
         assertEq(s.updatedAt, uint64(block.timestamp));
@@ -85,7 +86,7 @@ contract QuoteUpdateSigTest is QuayTestBase {
 
     function test_RevertSignerNotUpdater() public {
         (, uint256 strangerKey) = makeAddrAndKey("stranger");
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         bytes memory sig = _sign(wethBook, q, strangerKey);
 
         vm.prank(relayer);
@@ -94,7 +95,7 @@ contract QuoteUpdateSigTest is QuayTestBase {
     }
 
     function test_RevertTamperedQuote() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         bytes memory sig = _sign(wethBook, q, signerKey);
 
         q.bidPxX128 += 1; // relayer tampers after signing
@@ -107,7 +108,7 @@ contract QuoteUpdateSigTest is QuayTestBase {
         vm.prank(maker);
         amm.setUpdater(mathBook, signer, true);
 
-        QuaySharedLiquidityAMM.QuoteState memory q = _mathQuote(2);
+        QuayTypes.QuoteState memory q = _mathQuote(2);
         bytes memory sig = _sign(mathBook, q, signerKey);
 
         // Same payload replayed against a different book recovers a different
@@ -118,7 +119,7 @@ contract QuoteUpdateSigTest is QuayTestBase {
     }
 
     function test_RevertReplay() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         bytes memory sig = _sign(wethBook, q, signerKey);
 
         vm.startPrank(relayer);
@@ -129,7 +130,7 @@ contract QuoteUpdateSigTest is QuayTestBase {
     }
 
     function test_RevertDeactivatedSigner() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         bytes memory sig = _sign(wethBook, q, signerKey);
 
         vm.prank(maker);
@@ -141,14 +142,14 @@ contract QuoteUpdateSigTest is QuayTestBase {
     }
 
     function test_RevertMalformedSignature() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         vm.prank(relayer);
         vm.expectRevert(abi.encodeWithSelector(ECDSA.ECDSAInvalidSignatureLength.selector, 3));
         amm.updateQuoteWithSig(wethBook, q, hex"deadbe");
     }
 
     function test_SignedQuoteStillValidated() public {
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(2);
+        QuayTypes.QuoteState memory q = _wethQuote(2);
         q.maxIn0 = 0; // invalid payload, signed correctly
         bytes memory sig = _sign(wethBook, q, signerKey);
 
@@ -168,8 +169,7 @@ contract QuoteUpdateSigTest is QuayTestBase {
         bytes32[] memory ids = new bytes32[](2);
         ids[0] = wethBook;
         ids[1] = mathBook;
-        QuaySharedLiquidityAMM.QuoteState[] memory quotes =
-            new QuaySharedLiquidityAMM.QuoteState[](2);
+        QuayTypes.QuoteState[] memory quotes = new QuayTypes.QuoteState[](2);
         quotes[0] = _wethQuote(2);
         quotes[1] = _mathQuote(2);
         bytes[] memory sigs = new bytes[](2);
@@ -185,15 +185,14 @@ contract QuoteUpdateSigTest is QuayTestBase {
 
     function test_BatchRevertLengthMismatch() public {
         bytes32[] memory ids = new bytes32[](2);
-        QuaySharedLiquidityAMM.QuoteState[] memory quotes =
-            new QuaySharedLiquidityAMM.QuoteState[](1);
+        QuayTypes.QuoteState[] memory quotes = new QuayTypes.QuoteState[](1);
         bytes[] memory sigs = new bytes[](2);
 
         vm.prank(relayer);
         vm.expectRevert(QuaySharedLiquidityAMM.ArrayLengthMismatch.selector);
         amm.batchUpdateQuotesWithSig(ids, quotes, sigs);
 
-        quotes = new QuaySharedLiquidityAMM.QuoteState[](2);
+        quotes = new QuayTypes.QuoteState[](2);
         sigs = new bytes[](1);
         vm.prank(relayer);
         vm.expectRevert(QuaySharedLiquidityAMM.ArrayLengthMismatch.selector);
@@ -207,8 +206,7 @@ contract QuoteUpdateSigTest is QuayTestBase {
         bytes32[] memory ids = new bytes32[](2);
         ids[0] = wethBook;
         ids[1] = mathBook;
-        QuaySharedLiquidityAMM.QuoteState[] memory quotes =
-            new QuaySharedLiquidityAMM.QuoteState[](2);
+        QuayTypes.QuoteState[] memory quotes = new QuayTypes.QuoteState[](2);
         quotes[0] = _wethQuote(2);
         quotes[1] = _mathQuote(1); // stale nonce -> second update fails
         bytes[] memory sigs = new bytes[](2);

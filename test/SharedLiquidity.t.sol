@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {QuayTestBase} from "test/utils/QuayTestBase.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
+import {QuayTypes} from "src/QuayTypes.sol";
 
 /// @dev The aggregator-facing property: books sharing a liquidity group share
 ///      fillability but never price. A swap in book A can shrink what book B
@@ -19,11 +20,11 @@ contract SharedLiquidityTest is QuayTestBase {
 
         vm.prank(protocolOwner);
         btcBook = amm.createBook(
-            address(cbbtc), address(usdc), GROUP_MAIN, bytes32("BTCUSDC"), 0, updater
+            address(cbbtc), address(usdc), GROUP_MAIN, bytes32("BTCUSDC"), 0, address(bbo), updater
         );
         _deposit(GROUP_MAIN, cbbtc, 10e8);
 
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(1);
+        QuayTypes.QuoteState memory q = _wethQuote(1);
         q.bidPxX128 = BID_BTC;
         q.askPxX128 = ASK_BTC;
         q.maxIn0 = 10e8;
@@ -73,7 +74,7 @@ contract SharedLiquidityTest is QuayTestBase {
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(btcBook, address(cbbtc), 2e8);
         assertFalse(r.valid);
-        assertEq(uint8(r.reason), uint8(QuaySharedLiquidityAMM.QuoteReason.InsufficientLiquidity));
+        assertEq(uint8(r.reason), uint8(QuayTypes.QuoteReason.InsufficientLiquidity));
         assertEq(r.availableOut, usdcLeft);
 
         // The theoretical price is still quotable and unchanged.

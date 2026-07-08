@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {QuayTestBase} from "test/utils/QuayTestBase.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
+import {QuayTypes} from "src/QuayTypes.sol";
 
 contract FuzzTest is QuayTestBase {
     /// @dev The quoter is the source of truth: a swap in the same block must
@@ -51,7 +52,7 @@ contract FuzzTest is QuayTestBase {
         amountIn = bound(amountIn, 1, 1e24);
 
         _deposit(GROUP_MATH, math1, 1e30);
-        QuaySharedLiquidityAMM.QuoteState memory q = _mathQuote(2);
+        QuayTypes.QuoteState memory q = _mathQuote(2);
         q.bidPxX128 = bid;
         q.askPxX128 = ask;
         q.maxIn0 = type(uint128).max;
@@ -93,9 +94,15 @@ contract FuzzTest is QuayTestBase {
 
         vm.prank(protocolOwner);
         bytes32 bookId = amm.createBook(
-            address(math0), address(math1), GROUP_MATH, bytes32("FEEBOOK"), feeBps, updater
+            address(math0),
+            address(math1),
+            GROUP_MATH,
+            bytes32("FEEBOOK"),
+            feeBps,
+            address(bbo),
+            updater
         );
-        QuaySharedLiquidityAMM.QuoteState memory q = _mathQuote(1);
+        QuayTypes.QuoteState memory q = _mathQuote(1);
         q.maxIn0 = type(uint128).max;
         _pushQuote(bookId, q);
 

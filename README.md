@@ -40,9 +40,37 @@ test/Swap.t.sol             settlement, slippage/nonce/deadline guards, hostile 
 test/SharedLiquidity.t.sol  shared-group fillability vs. independent pricing
 test/QuoteUpdateSig.t.sol   EIP-712 relayed quote updates (digest pinning, replay, batch)
 test/Oracle.t.sol           per-book reference-price guardrails
+test/Strategy.t.sol         strategy registry governance, kill-switch, custom modules
 test/Fuzz.t.sol             property tests (round-trip no-profit, decay monotone, fees)
 test/Invariant.t.sol        solvency: balances == inventory + fees under random actions
 ```
+
+## Strategy modules
+
+Pricing is delegated per book to an immutable strategy module implementing
+`IQuayStrategy` (`src/interfaces/IQuayStrategy.sol`). The venue core keeps
+custody, inventory accounting, nonces, pause logic, quote expiry, the oracle
+guard, and settlement; the module only turns (quote params, direction, net
+input, available inventory) into an output amount, via a gas-capped staticcall
+so it can never write state, move funds, or brick the quoter (a reverting or
+gas-burning module degrades to a `StrategyError` quote reason).
+
+`src/strategies/BBOStrategy.sol` is the default: posted bid/ask with linear
+staleness decay and per-side size caps.
+
+Governance is three-tier and enforced at quote time:
+
+```text
+setStrategyAuthor(author, allowed)      owner curates who may submit modules
+registerStrategy(module)                author submits an immutable module
+setStrategyApproval(module, approved)   owner approves; false = Blocked
+retireStrategy(module)                  author (or owner) withdraws it, terminal
+```
+
+Only Approved strategies can quote or back new books. Blocking or retiring a
+strategy instantly invalidates quotes (`StrategyNotApproved`) and reverts swaps
+on every book that uses it — but never locks liquidity: deposits, withdrawals,
+and quote updates keep working, so makers can always pull their inventory.
 
 ## Signed quote updates
 

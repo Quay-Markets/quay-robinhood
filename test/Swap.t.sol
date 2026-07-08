@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {QuayTestBase} from "test/utils/QuayTestBase.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
+import {QuayTypes} from "src/QuayTypes.sol";
 import {FeeOnTransferERC20} from "test/utils/FeeOnTransferERC20.sol";
 import {ReentrantERC20, ITransferHook} from "test/utils/ReentrantERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -143,8 +144,7 @@ contract SwapTest is QuayTestBase {
             _swapParams(wethBook, address(weth), address(usdc), 1e18, 0);
         vm.expectRevert(
             abi.encodeWithSelector(
-                QuaySharedLiquidityAMM.QuoteInvalid.selector,
-                QuaySharedLiquidityAMM.QuoteReason.BookNotActive
+                QuaySharedLiquidityAMM.QuoteInvalid.selector, QuayTypes.QuoteReason.BookNotActive
             )
         );
         vm.prank(taker);
@@ -157,8 +157,7 @@ contract SwapTest is QuayTestBase {
             _swapParams(wethBook, address(weth), address(usdc), 1e18, 0);
         vm.expectRevert(
             abi.encodeWithSelector(
-                QuaySharedLiquidityAMM.QuoteInvalid.selector,
-                QuaySharedLiquidityAMM.QuoteReason.QuoteExpired
+                QuaySharedLiquidityAMM.QuoteInvalid.selector, QuayTypes.QuoteReason.QuoteExpired
             )
         );
         vm.prank(taker);
@@ -229,8 +228,9 @@ contract SwapTest is QuayTestBase {
         bytes32 groupId = keccak256("FOT_GROUP");
         vm.startPrank(protocolOwner);
         amm.createLiquidityGroup(groupId, maker);
-        bytes32 bookId =
-            amm.createBook(address(fot), address(usdc), groupId, bytes32("FOT"), 0, updater);
+        bytes32 bookId = amm.createBook(
+            address(fot), address(usdc), groupId, bytes32("FOT"), 0, address(bbo), updater
+        );
         vm.stopPrank();
 
         // Only USDC inventory is needed to quote FOT -> USDC.
@@ -240,7 +240,7 @@ contract SwapTest is QuayTestBase {
         amm.deposit(groupId, address(usdc), 100_000e6);
         vm.stopPrank();
 
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(1);
+        QuayTypes.QuoteState memory q = _wethQuote(1);
         q.bidPxX128 = Q128; // 1:1
         q.askPxX128 = Q128;
         _pushQuote(bookId, q);
@@ -260,8 +260,9 @@ contract SwapTest is QuayTestBase {
         bytes32 groupId = keccak256("RTK_GROUP");
         vm.startPrank(protocolOwner);
         amm.createLiquidityGroup(groupId, maker);
-        bytes32 bookId =
-            amm.createBook(address(weth), address(rtk), groupId, bytes32("RTK"), 0, updater);
+        bytes32 bookId = amm.createBook(
+            address(weth), address(rtk), groupId, bytes32("RTK"), 0, address(bbo), updater
+        );
         vm.stopPrank();
 
         rtk.mint(maker, 1_000e18);
@@ -270,7 +271,7 @@ contract SwapTest is QuayTestBase {
         amm.deposit(groupId, address(rtk), 1_000e18);
         vm.stopPrank();
 
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(1);
+        QuayTypes.QuoteState memory q = _wethQuote(1);
         q.bidPxX128 = Q128; // 1 RTK per WETH atom
         q.askPxX128 = Q128;
         _pushQuote(bookId, q);

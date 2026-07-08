@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {QuayTestBase} from "test/utils/QuayTestBase.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
+import {QuayTypes} from "src/QuayTypes.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract AdminTest is QuayTestBase {
@@ -82,12 +83,13 @@ contract AdminTest is QuayTestBase {
     function test_CreateBook() public {
         vm.prank(protocolOwner);
         bytes32 bookId = amm.createBook(
-            address(cbbtc), address(usdc), GROUP_MAIN, bytes32("BTCUSDC"), 10, updater
+            address(cbbtc), address(usdc), GROUP_MAIN, bytes32("BTCUSDC"), 10, address(bbo), updater
         );
 
         QuaySharedLiquidityAMM.Book memory b = amm.getBook(bookId);
         assertEq(b.token0, address(cbbtc));
         assertEq(b.token1, address(usdc));
+        assertEq(b.strategyModule, address(bbo));
         assertEq(b.liquidityGroupId, GROUP_MAIN);
         assertEq(b.protocolFeeBps, 10);
         assertEq(uint8(b.status), uint8(QuaySharedLiquidityAMM.BookStatus.Active));
@@ -111,44 +113,49 @@ contract AdminTest is QuayTestBase {
     function test_CreateBook_RevertNotOwner() public {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, maker));
         vm.prank(maker);
-        amm.createBook(address(cbbtc), address(usdc), GROUP_MAIN, 0, 10, updater);
+        amm.createBook(address(cbbtc), address(usdc), GROUP_MAIN, 0, 10, address(bbo), updater);
     }
 
     function test_CreateBook_RevertBadTokens() public {
         vm.startPrank(protocolOwner);
         vm.expectRevert(QuaySharedLiquidityAMM.InvalidAddress.selector);
-        amm.createBook(address(0), address(usdc), GROUP_MAIN, 0, 10, updater);
+        amm.createBook(address(0), address(usdc), GROUP_MAIN, 0, 10, address(bbo), updater);
         vm.expectRevert(QuaySharedLiquidityAMM.InvalidAddress.selector);
-        amm.createBook(address(cbbtc), address(0), GROUP_MAIN, 0, 10, updater);
+        amm.createBook(address(cbbtc), address(0), GROUP_MAIN, 0, 10, address(bbo), updater);
         vm.expectRevert(QuaySharedLiquidityAMM.InvalidAddress.selector);
-        amm.createBook(address(usdc), address(usdc), GROUP_MAIN, 0, 10, updater);
+        amm.createBook(address(usdc), address(usdc), GROUP_MAIN, 0, 10, address(bbo), updater);
         vm.stopPrank();
     }
 
     function test_CreateBook_RevertMissingGroup() public {
         vm.prank(protocolOwner);
         vm.expectRevert(QuaySharedLiquidityAMM.InvalidGroup.selector);
-        amm.createBook(address(cbbtc), address(usdc), NEW_GROUP, 0, 10, updater);
+        amm.createBook(address(cbbtc), address(usdc), NEW_GROUP, 0, 10, address(bbo), updater);
     }
 
     function test_CreateBook_RevertFeeTooHigh() public {
         vm.prank(protocolOwner);
         vm.expectRevert(QuaySharedLiquidityAMM.BadFee.selector);
-        amm.createBook(address(cbbtc), address(usdc), GROUP_MAIN, 0, 10_001, updater);
+        amm.createBook(address(cbbtc), address(usdc), GROUP_MAIN, 0, 10_001, address(bbo), updater);
     }
 
     function test_CreateBook_RevertDuplicateSalt() public {
         vm.startPrank(protocolOwner);
-        amm.createBook(address(cbbtc), address(usdc), GROUP_MAIN, bytes32("S"), 10, updater);
+        amm.createBook(
+            address(cbbtc), address(usdc), GROUP_MAIN, bytes32("S"), 10, address(bbo), updater
+        );
         vm.expectRevert(QuaySharedLiquidityAMM.InvalidBook.selector);
-        amm.createBook(address(cbbtc), address(usdc), GROUP_MAIN, bytes32("S"), 10, updater);
+        amm.createBook(
+            address(cbbtc), address(usdc), GROUP_MAIN, bytes32("S"), 10, address(bbo), updater
+        );
         vm.stopPrank();
     }
 
     function test_CreateBook_NoInitialUpdater() public {
         vm.prank(protocolOwner);
-        bytes32 bookId =
-            amm.createBook(address(cbbtc), address(usdc), GROUP_MAIN, 0, 10, address(0));
+        bytes32 bookId = amm.createBook(
+            address(cbbtc), address(usdc), GROUP_MAIN, 0, 10, address(bbo), address(0)
+        );
         assertEq(amm.getUpdaters(bookId).length, 0);
     }
 
@@ -250,7 +257,7 @@ contract AdminTest is QuayTestBase {
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
         assertFalse(r.valid);
-        assertEq(uint8(r.reason), uint8(QuaySharedLiquidityAMM.QuoteReason.ProtocolPaused));
+        assertEq(uint8(r.reason), uint8(QuayTypes.QuoteReason.ProtocolPaused));
 
         QuaySharedLiquidityAMM.SwapExactInputSingleParams memory p =
             _swapParams(wethBook, address(weth), address(usdc), 1e18, 0);
@@ -259,8 +266,7 @@ contract AdminTest is QuayTestBase {
         weth.approve(address(amm), 1e18);
         vm.expectRevert(
             abi.encodeWithSelector(
-                QuaySharedLiquidityAMM.QuoteInvalid.selector,
-                QuaySharedLiquidityAMM.QuoteReason.ProtocolPaused
+                QuaySharedLiquidityAMM.QuoteInvalid.selector, QuayTypes.QuoteReason.ProtocolPaused
             )
         );
         amm.swapExactInputSingle(p);

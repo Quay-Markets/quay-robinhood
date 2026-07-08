@@ -11,6 +11,8 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {AggregatorV3Interface} from "src/interfaces/AggregatorV3Interface.sol";
+import {IQuayStrategy} from "src/interfaces/IQuayStrategy.sol";
+import {QuayTypes} from "src/QuayTypes.sol";
 
 /// @title QuaySharedLiquidityAMM
 /// @notice Standalone propAMM venue with:
@@ -35,12 +37,12 @@ import {AggregatorV3Interface} from "src/interfaces/AggregatorV3Interface.sol";
 ///   No tx.origin, block.coinbase, tx.gasprice, block.basefee, or gasleft().
 ///   block.timestamp is used only for quote freshness/decay/expiry.
 ///   Pricing never depends on msg.sender or recipient.
-contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
+contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP712, QuayTypes {
     using SafeERC20 for IERC20;
 
-    uint256 public constant Q128 = 1 << 128;
-    uint16 public constant BPS = 10_000;
-    uint32 public constant MAX_DECAY_BPS = 9999;
+    /// @dev Gas stipend for strategy staticcalls. Generous for pricing math but
+    ///      bounds what a misbehaving module can burn per quote.
+    uint256 internal constant STRATEGY_GAS_CAP = 1_000_000;
 
     /// @notice EIP-712 type for relayed quote updates. `updatedAt` is excluded
     ///         because the contract always stamps it with block.timestamp.
@@ -55,24 +57,23 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         Closed
     }
 
-    enum QuoteReason {
-        OK,
-        BookMissing,
-        BookNotActive,
-        GroupMissing,
-        GroupPaused,
-        WrongToken,
-        AmountZero,
-        QuoteMissing,
-        QuoteExpired,
-        BadPrices,
-        SizeExceeded,
-        ZeroOutput,
-        InsufficientLiquidity,
-        ProtocolPaused,
-        OracleInvalid,
-        OracleStale,
-        OracleDeviation
+    /// @notice Lifecycle of a strategy module.
+    ///         Only Approved strategies can quote or back new books. Blocking
+    ///         or retiring a strategy stops quoting/swaps on its books
+    ///         immediately but never touches liquidity: group owners can
+    ///         always withdraw their inventory.
+    enum StrategyStatus {
+        None, // never registered
+        Registered, // submitted by an author, awaiting owner approval
+        Approved, // live
+        Blocked, // disabled by the protocol owner; owner may re-approve
+        Retired // permanently withdrawn by its author
+    }
+
+    struct StrategyInfo {
+        address author;
+        uint64 registeredAt;
+        StrategyStatus status;
     }
 
     struct LiquidityGroup {
@@ -85,24 +86,11 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
     struct Book {
         address token0;
         address token1;
+        address strategyModule;
         bytes32 liquidityGroupId;
         uint16 protocolFeeBps;
         BookStatus status;
         uint64 createdAt;
-    }
-
-    struct QuoteState {
-        uint64 nonce;
-        uint64 updatedAt;
-        uint64 freshUntil;
-        uint64 validUntil;
-        uint32 decayBpsPerSecond;
-        uint32 maxDecayBps;
-        uint256 bidPxX128;
-        uint256 askPxX128;
-        uint128 maxIn0;
-        uint128 maxIn1;
-        bytes32 sourceHash;
     }
 
     struct QuoteResult {
@@ -166,6 +154,10 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
 
     mapping(bytes32 bookId => OracleConfig) public oracleConfigs;
 
+    /// @notice Addresses allowed to register new strategy modules.
+    mapping(address author => bool) public isStrategyAuthor;
+    mapping(address module => StrategyInfo) public strategies;
+
     mapping(bytes32 bookId => mapping(address updater => bool)) public isUpdater;
     mapping(bytes32 bookId => mapping(address updater => bool)) private updaterSeen;
     mapping(bytes32 bookId => address[]) private updaterList;
@@ -182,6 +174,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         address indexed token1,
         bytes32 liquidityGroupId,
         uint16 protocolFeeBps,
+        address strategyModule,
         BookStatus status
     );
 
@@ -195,6 +188,14 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         uint32 maxAge,
         uint16 maxDeviationBps,
         uint256 priceScale
+    );
+    event StrategyAuthorSet(address indexed author, bool allowed);
+    event StrategyRegistered(address indexed module, address indexed author);
+    event StrategyStatusChanged(
+        address indexed module,
+        StrategyStatus oldStatus,
+        StrategyStatus newStatus,
+        address indexed actor
     );
 
     event QuoteUpdated(
@@ -256,6 +257,12 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
     error BadQuote();
     error BadOracleConfig();
     error ArrayLengthMismatch();
+    error NotStrategyAuthor();
+    error InvalidStrategy();
+    error StrategyAlreadyRegistered();
+    error StrategyNotRegistered();
+    error StrategyNotApprovedError();
+    error StrategyRetiredError();
     error StaleQuoteNonce();
     error DeadlineExpired();
     error QuoteInvalid(QuoteReason reason);
@@ -282,6 +289,60 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         _unpause();
     }
 
+    // ------------------------------------------------------------------
+    // Strategy registry
+    //
+    // Three-tier governance: the owner curates who may author modules,
+    // authors register immutable modules, and the owner approves each one
+    // before it can quote. Blocking (owner) or retiring (author) a module
+    // instantly invalidates quotes and swaps on every book that uses it,
+    // but never touches liquidity: group owners can always withdraw.
+    // ------------------------------------------------------------------
+
+    function setStrategyAuthor(address author, bool allowed) external onlyOwner {
+        if (author == address(0)) revert InvalidAddress();
+        isStrategyAuthor[author] = allowed;
+        emit StrategyAuthorSet(author, allowed);
+    }
+
+    /// @notice Submit an immutable strategy module for approval.
+    function registerStrategy(address module) external {
+        if (!isStrategyAuthor[msg.sender] && msg.sender != owner()) revert NotStrategyAuthor();
+        if (module == address(0) || module.code.length == 0) revert InvalidStrategy();
+        if (strategies[module].status != StrategyStatus.None) revert StrategyAlreadyRegistered();
+        strategies[module] = StrategyInfo({
+            author: msg.sender,
+            registeredAt: uint64(block.timestamp),
+            status: StrategyStatus.Registered
+        });
+        emit StrategyRegistered(module, msg.sender);
+        emit StrategyStatusChanged(
+            module, StrategyStatus.None, StrategyStatus.Registered, msg.sender
+        );
+    }
+
+    /// @notice Owner approval switch. `approved = false` blocks the strategy:
+    ///         every book using it stops quoting until re-approved.
+    function setStrategyApproval(address module, bool approved) external onlyOwner {
+        StrategyInfo storage s = strategies[module];
+        if (s.status == StrategyStatus.None) revert StrategyNotRegistered();
+        if (s.status == StrategyStatus.Retired) revert StrategyRetiredError();
+        StrategyStatus old = s.status;
+        s.status = approved ? StrategyStatus.Approved : StrategyStatus.Blocked;
+        emit StrategyStatusChanged(module, old, s.status, msg.sender);
+    }
+
+    /// @notice Authors (or the owner) can permanently withdraw a module. Terminal.
+    function retireStrategy(address module) external {
+        StrategyInfo storage s = strategies[module];
+        if (s.status == StrategyStatus.None) revert StrategyNotRegistered();
+        if (msg.sender != s.author && msg.sender != owner()) revert NotStrategyAuthor();
+        if (s.status == StrategyStatus.Retired) revert StrategyRetiredError();
+        StrategyStatus old = s.status;
+        s.status = StrategyStatus.Retired;
+        emit StrategyStatusChanged(module, old, StrategyStatus.Retired, msg.sender);
+    }
+
     function createLiquidityGroup(bytes32 liquidityGroupId, address groupOwner) external onlyOwner {
         if (liquidityGroupId == bytes32(0) || groupOwner == address(0)) revert InvalidAddress();
         if (liquidityGroups[liquidityGroupId].exists) revert InvalidGroup();
@@ -299,6 +360,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         bytes32 liquidityGroupId,
         bytes32 salt,
         uint16 protocolFeeBps,
+        address strategyModule,
         address initialUpdater
     ) external onlyOwner returns (bytes32 bookId) {
         if (token0 == address(0) || token1 == address(0) || token0 == token1) {
@@ -306,6 +368,9 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         }
         if (!liquidityGroups[liquidityGroupId].exists) revert InvalidGroup();
         if (protocolFeeBps > BPS) revert BadFee();
+        if (strategies[strategyModule].status != StrategyStatus.Approved) {
+            revert StrategyNotApprovedError();
+        }
 
         bookId = keccak256(
             abi.encodePacked(
@@ -317,6 +382,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         books[bookId] = Book({
             token0: token0,
             token1: token1,
+            strategyModule: strategyModule,
             liquidityGroupId: liquidityGroupId,
             protocolFeeBps: protocolFeeBps,
             status: BookStatus.Active,
@@ -331,7 +397,13 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         }
 
         emit BookCreated(
-            bookId, token0, token1, liquidityGroupId, protocolFeeBps, BookStatus.Active
+            bookId,
+            token0,
+            token1,
+            liquidityGroupId,
+            protocolFeeBps,
+            strategyModule,
+            BookStatus.Active
         );
     }
 
@@ -741,8 +813,9 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         QuoteState storage q = quoteStates[bookId];
         if (q.nonce == 0) return _invalid(r, QuoteReason.QuoteMissing);
         if (block.timestamp > q.validUntil) return _invalid(r, QuoteReason.QuoteExpired);
-        if (q.bidPxX128 == 0 || q.askPxX128 < q.bidPxX128) {
-            return _invalid(r, QuoteReason.BadPrices);
+
+        if (strategies[b.strategyModule].status != StrategyStatus.Approved) {
+            return _invalid(r, QuoteReason.StrategyNotApproved);
         }
 
         OracleConfig storage oc = oracleConfigs[bookId];
@@ -751,33 +824,36 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
             if (oracleReason != QuoteReason.OK) return _invalid(r, oracleReason);
         }
 
-        if (token0In && amountIn > uint256(q.maxIn0)) return _invalid(r, QuoteReason.SizeExceeded);
-        if (!token0In && amountIn > uint256(q.maxIn1)) {
-            return _invalid(r, QuoteReason.SizeExceeded);
-        }
-
         r.quoteNonce = q.nonce;
         r.updatedAt = q.updatedAt;
         r.freshUntil = q.freshUntil;
         r.validUntil = q.validUntil;
         r.inventoryNonceOut = inventoryNonce[b.liquidityGroupId][r.tokenOut];
 
-        r.appliedDecayBps = _appliedDecayBps(q);
         r.feeAmount = Math.mulDiv(amountIn, uint256(b.protocolFeeBps), uint256(BPS));
         r.netAmountIn = amountIn - r.feeAmount;
 
-        if (token0In) {
-            // User sells token0 at the bid. Decay worsens by lowering bid.
-            uint256 decay = uint256(r.appliedDecayBps);
-            uint256 bid = Math.mulDiv(q.bidPxX128, uint256(BPS) - decay, uint256(BPS));
-            r.appliedPriceX128 = bid;
-            r.amountOut = Math.mulDiv(r.netAmountIn, bid, Q128);
-        } else {
-            // User sells token1 at the ask. Decay worsens by raising ask.
-            uint256 decay = uint256(r.appliedDecayBps);
-            uint256 ask = Math.mulDiv(q.askPxX128, uint256(BPS) + decay, uint256(BPS));
-            r.appliedPriceX128 = ask;
-            r.amountOut = Math.mulDiv(r.netAmountIn, Q128, ask);
+        // Pricing is delegated to the book's approved strategy module via a
+        // gas-capped staticcall: it cannot write state or move funds, and a
+        // reverting module degrades to an invalid quote instead of bricking
+        // the quoter.
+        // slither-disable-next-line calls-loop
+        try IQuayStrategy(b.strategyModule).quoteExactInput{gas: STRATEGY_GAS_CAP}(
+            q, token0In, amountIn, r.netAmountIn, inventory[b.liquidityGroupId][r.tokenOut]
+        ) returns (
+            uint256 amountOut,
+            uint256 appliedPriceX128,
+            uint32 appliedDecayBps,
+            QuoteReason strategyReason
+        ) {
+            if (strategyReason != QuoteReason.OK) {
+                return _invalid(r, strategyReason);
+            }
+            r.amountOut = amountOut;
+            r.appliedPriceX128 = appliedPriceX128;
+            r.appliedDecayBps = appliedDecayBps;
+        } catch {
+            return _invalid(r, QuoteReason.StrategyError);
         }
 
         if (r.amountOut == 0) return _invalid(r, QuoteReason.ZeroOutput);
@@ -824,16 +900,6 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         } catch {
             return QuoteReason.OracleInvalid;
         }
-    }
-
-    function _appliedDecayBps(QuoteState storage q) internal view returns (uint32) {
-        if (block.timestamp <= q.freshUntil) return 0;
-        uint256 elapsed = block.timestamp - q.freshUntil;
-        uint256 decay = elapsed * q.decayBpsPerSecond;
-        if (decay > q.maxDecayBps) decay = q.maxDecayBps;
-        // casting to 'uint32' is safe: decay is capped at q.maxDecayBps, a uint32
-        // forge-lint: disable-next-line(unsafe-typecast)
-        return uint32(decay);
     }
 
     function _invalid(QuoteResult memory r, QuoteReason reason)

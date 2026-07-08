@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {QuayTestBase} from "test/utils/QuayTestBase.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
+import {QuayTypes} from "src/QuayTypes.sol";
 
 contract QuoteViewTest is QuayTestBase {
     using QuoteAssertions for QuaySharedLiquidityAMM.QuoteResult;
@@ -15,7 +16,7 @@ contract QuoteViewTest is QuayTestBase {
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(mathBook, address(math0), 1e18);
         assertTrue(r.valid);
-        assertEq(uint8(r.reason), uint8(QuaySharedLiquidityAMM.QuoteReason.OK));
+        assertEq(uint8(r.reason), uint8(QuayTypes.QuoteReason.OK));
         assertEq(r.amountOut, 100e18); // 1e18 * 100
         assertEq(r.feeAmount, 0);
         assertEq(r.netAmountIn, 1e18);
@@ -111,7 +112,7 @@ contract QuoteViewTest is QuayTestBase {
         vm.warp(START + VALID_SECONDS + 1);
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(mathBook, address(math0), 1e18);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.QuoteExpired);
+        r.assertInvalid(QuayTypes.QuoteReason.QuoteExpired);
     }
 
     // ------------------------------------------------------------------
@@ -121,7 +122,7 @@ contract QuoteViewTest is QuayTestBase {
     function test_Quote_BookMissing() public view {
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(bytes32("nope"), address(weth), 1e18);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.BookMissing);
+        r.assertInvalid(QuayTypes.QuoteReason.BookMissing);
     }
 
     function test_Quote_BookNotActive() public {
@@ -129,12 +130,12 @@ contract QuoteViewTest is QuayTestBase {
         amm.setBookStatus(wethBook, QuaySharedLiquidityAMM.BookStatus.Paused);
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.BookNotActive);
+        r.assertInvalid(QuayTypes.QuoteReason.BookNotActive);
 
         vm.prank(maker);
         amm.setBookStatus(wethBook, QuaySharedLiquidityAMM.BookStatus.Closed);
         r = amm.quoteExactInput(wethBook, address(weth), 1e18);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.BookNotActive);
+        r.assertInvalid(QuayTypes.QuoteReason.BookNotActive);
     }
 
     function test_Quote_GroupPaused() public {
@@ -142,37 +143,38 @@ contract QuoteViewTest is QuayTestBase {
         amm.setLiquidityGroupPaused(GROUP_MAIN, true);
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.GroupPaused);
+        r.assertInvalid(QuayTypes.QuoteReason.GroupPaused);
     }
 
     function test_Quote_WrongToken() public view {
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(math0), 1e18);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.WrongToken);
+        r.assertInvalid(QuayTypes.QuoteReason.WrongToken);
     }
 
     function test_Quote_AmountZero() public view {
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 0);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.AmountZero);
+        r.assertInvalid(QuayTypes.QuoteReason.AmountZero);
     }
 
     function test_Quote_QuoteMissing() public {
         vm.prank(protocolOwner);
-        bytes32 bookId =
-            amm.createBook(address(cbbtc), address(usdc), GROUP_MAIN, bytes32("BTC"), 10, updater);
+        bytes32 bookId = amm.createBook(
+            address(cbbtc), address(usdc), GROUP_MAIN, bytes32("BTC"), 10, address(bbo), updater
+        );
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(bookId, address(cbbtc), 1e8);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.QuoteMissing);
+        r.assertInvalid(QuayTypes.QuoteReason.QuoteMissing);
     }
 
     function test_Quote_SizeExceeded() public view {
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), uint256(MAX_IN0) + 1);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.SizeExceeded);
+        r.assertInvalid(QuayTypes.QuoteReason.SizeExceeded);
 
         r = amm.quoteExactInput(wethBook, address(usdc), uint256(MAX_IN1) + 1);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.SizeExceeded);
+        r.assertInvalid(QuayTypes.QuoteReason.SizeExceeded);
 
         // Exactly at the cap is allowed (inventory permitting).
         r = amm.quoteExactInput(wethBook, address(weth), uint256(MAX_IN0));
@@ -183,11 +185,11 @@ contract QuoteViewTest is QuayTestBase {
         // 100 atoms of token1 at ask 200 floors to zero token0 out.
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(mathBook, address(math1), 100);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.ZeroOutput);
+        r.assertInvalid(QuayTypes.QuoteReason.ZeroOutput);
 
         // 1 WETH atom is worth ~2e-9 USDC atoms -> floors to zero.
         r = amm.quoteExactInput(wethBook, address(weth), 1);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.ZeroOutput);
+        r.assertInvalid(QuayTypes.QuoteReason.ZeroOutput);
     }
 
     function test_Quote_InsufficientLiquidity() public {
@@ -197,7 +199,7 @@ contract QuoteViewTest is QuayTestBase {
 
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
-        r.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.InsufficientLiquidity);
+        r.assertInvalid(QuayTypes.QuoteReason.InsufficientLiquidity);
         assertEq(r.availableOut, 1000e6);
     }
 
@@ -233,9 +235,10 @@ contract QuoteViewTest is QuayTestBase {
     function test_QuoteBestExactInput_PicksBestBook() public {
         // Second WETH/USDC book with zero fee and a better bid.
         vm.prank(protocolOwner);
-        bytes32 betterBook =
-            amm.createBook(address(weth), address(usdc), GROUP_MAIN, bytes32("BETTER"), 0, updater);
-        QuaySharedLiquidityAMM.QuoteState memory q = _wethQuote(1);
+        bytes32 betterBook = amm.createBook(
+            address(weth), address(usdc), GROUP_MAIN, bytes32("BETTER"), 0, address(bbo), updater
+        );
+        QuayTypes.QuoteState memory q = _wethQuote(1);
         q.bidPxX128 = (2000e6 * Q128) / 1e18;
         _pushQuote(betterBook, q);
 
@@ -259,7 +262,7 @@ contract QuoteViewTest is QuayTestBase {
     function test_QuoteBestExactInput_NoBooksForPair() public view {
         QuaySharedLiquidityAMM.QuoteResult memory best =
             amm.quoteBestExactInput(address(weth), address(cbbtc), 1e18);
-        best.assertInvalid(QuaySharedLiquidityAMM.QuoteReason.BookMissing);
+        best.assertInvalid(QuayTypes.QuoteReason.BookMissing);
     }
 
     function test_BatchQuoteExactInput() public view {
@@ -271,7 +274,7 @@ contract QuoteViewTest is QuayTestBase {
         assertEq(rs.length, 2);
         assertTrue(rs[0].valid);
         assertFalse(rs[1].valid);
-        assertEq(uint8(rs[1].reason), uint8(QuaySharedLiquidityAMM.QuoteReason.WrongToken));
+        assertEq(uint8(rs[1].reason), uint8(QuayTypes.QuoteReason.WrongToken));
     }
 
     // ------------------------------------------------------------------
@@ -293,7 +296,7 @@ contract QuoteViewTest is QuayTestBase {
 library QuoteAssertions {
     function assertInvalid(
         QuaySharedLiquidityAMM.QuoteResult memory r,
-        QuaySharedLiquidityAMM.QuoteReason reason
+        QuayTypes.QuoteReason reason
     ) internal pure {
         require(!r.valid, "expected invalid quote");
         require(uint8(r.reason) == uint8(reason), "unexpected reason");

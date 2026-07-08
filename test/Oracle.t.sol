@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {QuayTestBase} from "test/utils/QuayTestBase.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
+import {QuayTypes} from "src/QuayTypes.sol";
 import {MockAggregatorV3} from "test/utils/MockAggregatorV3.sol";
 
 contract OracleTest is QuayTestBase {
@@ -45,7 +46,7 @@ contract OracleTest is QuayTestBase {
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
         assertFalse(r.valid);
-        assertEq(_reason(r), uint8(QuaySharedLiquidityAMM.QuoteReason.OracleDeviation));
+        assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleDeviation));
 
         QuaySharedLiquidityAMM.SwapExactInputSingleParams memory p =
             _swapParams(wethBook, address(weth), address(usdc), 1e18, 0);
@@ -54,8 +55,7 @@ contract OracleTest is QuayTestBase {
         weth.approve(address(amm), 1e18);
         vm.expectRevert(
             abi.encodeWithSelector(
-                QuaySharedLiquidityAMM.QuoteInvalid.selector,
-                QuaySharedLiquidityAMM.QuoteReason.OracleDeviation
+                QuaySharedLiquidityAMM.QuoteInvalid.selector, QuayTypes.QuoteReason.OracleDeviation
             )
         );
         amm.swapExactInputSingle(p);
@@ -74,7 +74,7 @@ contract OracleTest is QuayTestBase {
         amm.setBookOracle(wethBook, address(feed), MAX_AGE, 400, PRICE_SCALE);
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
-        assertEq(_reason(r), uint8(QuaySharedLiquidityAMM.QuoteReason.OracleDeviation));
+        assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleDeviation));
 
         // Deviation must be measured relative to the oracle reference, not the
         // quote mid: diff/ref = 4.762%, diff/mid = 5.0%. At 4.80% tolerance the
@@ -93,32 +93,32 @@ contract OracleTest is QuayTestBase {
         _pushWethQuote(3);
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
-        assertEq(_reason(r), uint8(QuaySharedLiquidityAMM.QuoteReason.OracleStale));
+        assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleStale));
     }
 
     function test_Oracle_NonPositiveAnswer() public {
         feed.set(0, block.timestamp);
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
-        assertEq(_reason(r), uint8(QuaySharedLiquidityAMM.QuoteReason.OracleInvalid));
+        assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleInvalid));
 
         feed.set(-1, block.timestamp);
         r = amm.quoteExactInput(wethBook, address(weth), 1e18);
-        assertEq(_reason(r), uint8(QuaySharedLiquidityAMM.QuoteReason.OracleInvalid));
+        assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleInvalid));
     }
 
     function test_Oracle_RevertingFeedIsInvalidNotReverting() public {
         feed.setRevert(true);
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
-        assertEq(_reason(r), uint8(QuaySharedLiquidityAMM.QuoteReason.OracleInvalid));
+        assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleInvalid));
     }
 
     function test_Oracle_OverflowingAnswerIsInvalidNotReverting() public {
         feed.set(type(int256).max, block.timestamp);
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
-        assertEq(_reason(r), uint8(QuaySharedLiquidityAMM.QuoteReason.OracleInvalid));
+        assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleInvalid));
     }
 
     function test_Oracle_UnguardedBookUnaffected() public {

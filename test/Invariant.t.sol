@@ -3,6 +3,8 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
+import {QuayTypes} from "src/QuayTypes.sol";
+import {BBOStrategy} from "src/strategies/BBOStrategy.sol";
 import {MockERC20} from "test/utils/MockERC20.sol";
 
 /// @dev Core solvency invariant: for every token, the contract's ERC-20
@@ -16,7 +18,10 @@ contract InvariantTest is Test {
     function setUp() public {
         vm.warp(1_700_000_000);
         amm = new QuaySharedLiquidityAMM(address(this));
-        handler = new QuayHandler(amm);
+        BBOStrategy bbo = new BBOStrategy();
+        amm.registerStrategy(address(bbo));
+        amm.setStrategyApproval(address(bbo), true);
+        handler = new QuayHandler(amm, bbo);
 
         amm.createLiquidityGroup(handler.GROUP1(), address(handler));
         amm.createLiquidityGroup(handler.GROUP2(), address(handler));
@@ -59,14 +64,16 @@ contract QuayHandler is Test {
     bytes32 public constant GROUP2 = keccak256("G2");
 
     QuaySharedLiquidityAMM public immutable amm;
+    BBOStrategy internal immutable bbo;
     MockERC20[3] private _tokens;
     bytes32[3] private _books;
     mapping(bytes32 bookId => uint64) public lastSeenNonce;
 
     address internal trader = makeAddr("trader");
 
-    constructor(QuaySharedLiquidityAMM amm_) {
+    constructor(QuaySharedLiquidityAMM amm_, BBOStrategy bbo_) {
         amm = amm_;
+        bbo = bbo_;
         _tokens[0] = new MockERC20("TokenA", "TKA", 18);
         _tokens[1] = new MockERC20("TokenB", "TKB", 6);
         _tokens[2] = new MockERC20("TokenC", "TKC", 8);
@@ -84,13 +91,31 @@ contract QuayHandler is Test {
     function createBooks(address protocolOwner) external {
         vm.startPrank(protocolOwner);
         _books[0] = amm.createBook(
-            address(_tokens[0]), address(_tokens[1]), GROUP1, bytes32("B0"), 30, address(this)
+            address(_tokens[0]),
+            address(_tokens[1]),
+            GROUP1,
+            bytes32("B0"),
+            30,
+            address(bbo),
+            address(this)
         );
         _books[1] = amm.createBook(
-            address(_tokens[2]), address(_tokens[1]), GROUP1, bytes32("B1"), 0, address(this)
+            address(_tokens[2]),
+            address(_tokens[1]),
+            GROUP1,
+            bytes32("B1"),
+            0,
+            address(bbo),
+            address(this)
         );
         _books[2] = amm.createBook(
-            address(_tokens[0]), address(_tokens[2]), GROUP2, bytes32("B2"), 100, address(this)
+            address(_tokens[0]),
+            address(_tokens[2]),
+            GROUP2,
+            bytes32("B2"),
+            100,
+            address(bbo),
+            address(this)
         );
         vm.stopPrank();
     }
@@ -137,7 +162,7 @@ contract QuayHandler is Test {
 
         amm.updateQuote(
             bookId,
-            QuaySharedLiquidityAMM.QuoteState({
+            QuayTypes.QuoteState({
                 nonce: nonce,
                 updatedAt: 0,
                 freshUntil: uint64(block.timestamp) + 2,
