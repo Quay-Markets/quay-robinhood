@@ -63,16 +63,22 @@ quay-monorepo `onchain/vm/research/` (structural ports — same curve shapes and
 rejection semantics, EVM-native fixed point):
 
 ```text
-SolFiStrategy      piecewise-linear spline, <=8 points per side, saturating
-                   (x[0]=0, x strictly increasing, y monotone) — the spline IS
-                   the curve; makers reprice by rewriting it
-HumidiFiStrategy   keeper-pushed mid (QuoteState.bidPxX128) + smooth spread
-                   base + isqrt(out/sqrtDiv) + out/linDiv in 1e-8 units,
-                   discrete tier kick, 40bps-style cap, circuit breaker
-BisonFiStrategy    mid + freshness haircut (ppm/second off q.updatedAt, hard
-                   staleness gate) + per-side constant spread
-                   max(field,floor)*100/256 ppm + additive tier ladder on the
-                   fill ratio out/availableOut, ~0.7 ratio rejection
+SolFiStrategy      slot-decay quote model (Y_AXIS_FORMULA_PINNED.md): posted
+                   mid + per-side C multiplier interpolating fresh -> stale
+                   over a ramp window (toxicity defense), linear 1e-7 fee,
+                   hard freshness gate; the account's splines are dormant on
+                   the calibrated path and are not ported
+HumidiFiStrategy   keeper-pushed mid (QuoteState.bidPxX128), taker-adverse
+                   spread applied as (1e8 - s)/1e8 in one fused division
+                   (authoritative simulator convention); optional fitted
+                   sqrt/linear penalty + input-threshold kick, 40bps cap,
+                   circuit breaker
+BisonFiStrategy    June re-RE model: fused haircut (pick + age*base)*100/256
+                   in ppb with the sd=0 field-drop discount, per-side
+                   field/floor + defaultPick fallback, signed additive tier
+                   ladder on the fill ratio out/availableOut (negative offsets
+                   may improve price, matching the binary), optional ratio
+                   gate, hard staleness gate
 ```
 
 These extend `ConfigurableStrategy`: slow-moving curve parameters are stored

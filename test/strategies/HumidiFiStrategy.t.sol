@@ -33,18 +33,20 @@ contract HumidiFiStrategyTest is StrategyTestBase {
             sqrtDiv: 1e4,
             linDiv: 1e9,
             kickSpread: 594, // the original's discrete tier kick
-            maxSpread: 400_000, // 40 bps, the original's cap
-            kickThreshold: 5e12
+            maxSpread: 400_000, // 40 bps, the state[48] analog
+            kickThreshold: 0 // kick exercised in its own dedicated test
         });
     }
 
-    /// @dev Reference formula straight from the research doc:
-    ///      spread = base + isqrt(out/sqrtDiv) + out/linDiv (+kick), capped.
-    function _expectedOut(uint256 outPerfect, bool kicked) internal pure returns (uint256) {
-        uint256 spread = 50_000 + _isqrt(outPerfect / 1e4) + outPerfect / 1e9;
-        if (kicked) spread += 594;
+    /// @dev Independent reference: fitted-model spread + the authoritative
+    ///      multiply-by-(1-s) single-division settlement.
+    function _refOut(uint256 netIn, bool token0In) internal pure returns (uint256) {
+        uint256 perfect = token0In ? netIn * MID : netIn / MID;
+        uint256 spread = 50_000 + _isqrt(perfect / 1e4) + perfect / 1e9;
         if (spread > 400_000) spread = 400_000;
-        return (outPerfect * DENOM) / (DENOM + spread);
+        return token0In
+            ? (netIn * (DENOM - spread) * MID) / DENOM
+            : (netIn * (DENOM - spread)) / (MID * DENOM);
     }
 
     function _isqrt(uint256 v) internal pure returns (uint256 r) {
@@ -67,47 +69,66 @@ contract HumidiFiStrategyTest is StrategyTestBase {
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(book, address(math0), 4e10);
         assertTrue(r.valid);
-        assertEq(r.amountOut, (uint256(4e12) * DENOM) / (DENOM + 74_000));
-        assertEq(r.amountOut, _expectedOut(4e12, false));
-        assertEq(r.appliedDecayBps, 7); // 74_000 units / 1e4 = 7.4 -> 7 bps
-        assertEq(r.appliedPriceX128, (MID * Q128 * DENOM) / (DENOM + 74_000));
+        assertEq(r.amountOut, (uint256(4e10) * (DENOM - 74_000) * MID) / DENOM);
+        assertEq(r.amountOut, _refOut(4e10, true));
+        assertEq(r.appliedDecayBps, 7); // 74_000 units / 1e4 -> 7 bps
+        assertEq(r.appliedPriceX128, (MID * Q128 * (DENOM - 74_000)) / DENOM);
     }
 
     function test_ReverseDirectionExact() public view {
         // Sell token1: netIn 1e14 -> perfect 1e12; isqrt(1e8)=10_000; lin 1_000.
-        // spread = 50_000 + 10_000 + 1_000 = 61_000.
+        // spread = 61_000.
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(book, address(math1), 1e14);
-        assertEq(r.amountOut, (uint256(1e12) * DENOM) / (DENOM + 61_000));
-        // Taker buys token0: effective price is the inflated mid.
-        assertEq(r.appliedPriceX128, (MID * Q128 * (DENOM + 61_000)) / DENOM);
+        assertEq(r.amountOut, (uint256(1e14) * (DENOM - 61_000)) / (MID * DENOM));
+        assertEq(r.amountOut, _refOut(1e14, false));
+        // Taker buys token0 at the widened price.
+        assertEq(r.appliedPriceX128, (MID * Q128 * DENOM) / (DENOM - 61_000));
     }
 
-    function test_KickAppliesExactlyAtThreshold() public view {
-        uint256 below = amm.quoteExactInput(book, address(math0), 5e12 - 1).amountOut;
-        uint256 at = amm.quoteExactInput(book, address(math0), 5e12).amountOut;
+    function test_KickAppliesExactlyAtInputThreshold() public {
+        // The original tier selector compares raw amount_in. Pick a size where
+        // the smooth spread (~61_000) is far from the cap so the kick shows.
+        HumidiFiStrategy.Config memory c = _config();
+        c.kickThreshold = 1e10;
+        vm.prank(maker);
+        strat.setConfig(book, c);
 
-        assertEq(below, _expectedOut(uint256(5e12 - 1) * MID, false));
-        assertEq(at, _expectedOut(uint256(5e12) * MID, true));
+        uint256 below = amm.quoteExactInput(book, address(math0), 1e10 - 1).amountOut;
+        uint256 at = amm.quoteExactInput(book, address(math0), 1e10).amountOut;
+
+        // Below the boundary: smooth spread only (netIn 1e10-1 ~ spread 60_998).
+        assertEq(below, _refOut(1e10 - 1, true));
+        // At the boundary: +594 on top of the smooth 61_000.
+        assertEq(at, (uint256(1e10) * (DENOM - 61_594) * MID) / DENOM);
+        assertLt(at, _refOut(1e10, true)); // strictly worse than no-kick
     }
 
-    function test_KickThresholdIsInBaseTokenUnits() public view {
-        // Selling token1: the base-token quantity is the perfect output.
-        // netIn 1e14 -> 1e12 token0 < 5e12 threshold: no kick.
-        uint256 small = amm.quoteExactInput(book, address(math1), 1e14).amountOut;
-        assertEq(small, _expectedOut(1e12, false));
+    function test_FlatSpreadRegime() public {
+        // sqrtDiv = linDiv = 0 disables the fitted penalty: the replay-verified
+        // flat regime, spread == baseSpread for any size.
+        HumidiFiStrategy.Config memory c = _config();
+        c.sqrtDiv = 0;
+        c.linDiv = 0;
+        c.kickThreshold = 0;
+        vm.prank(maker);
+        strat.setConfig(book, c);
 
-        // netIn 5e14 -> 5e12 token0 == threshold: kick applies.
-        uint256 large = amm.quoteExactInput(book, address(math1), 5e14).amountOut;
-        assertEq(large, _expectedOut(5e12, true));
+        assertEq(
+            amm.quoteExactInput(book, address(math0), 1e10).amountOut,
+            (uint256(1e10) * (DENOM - 50_000) * MID) / DENOM
+        );
+        assertEq(
+            amm.quoteExactInput(book, address(math0), 1e15).amountOut,
+            (uint256(1e15) * (DENOM - 50_000) * MID) / DENOM
+        );
     }
 
     function test_SpreadIsCapped() public view {
-        // Huge input: linear term alone would exceed the 40 bps cap.
-        uint256 netIn = 1e16; // perfect 1e18 -> linear term 1e9 units >> cap
+        // Huge input: the linear term alone would exceed the 40 bps cap.
         QuaySharedLiquidityAMM.QuoteResult memory r =
-            amm.quoteExactInput(book, address(math0), netIn);
-        assertEq(r.amountOut, (uint256(1e18) * DENOM) / (DENOM + 400_000));
+            amm.quoteExactInput(book, address(math0), 1e16);
+        assertEq(r.amountOut, (uint256(1e16) * (DENOM - 400_000) * MID) / DENOM);
         assertEq(r.appliedDecayBps, 40);
     }
 
@@ -115,7 +136,10 @@ contract HumidiFiStrategyTest is StrategyTestBase {
         _pushQuote(book, _midQuote(2, 2 * MID * Q128)); // keeper doubles the mid
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(book, address(math0), 4e10);
-        assertEq(r.amountOut, _expectedOut(8e12, false));
+        // perfect doubles; recompute the reference at the new mid.
+        uint256 perfect = uint256(4e10) * 2 * MID;
+        uint256 spread = 50_000 + _isqrt(perfect / 1e4) + perfect / 1e9;
+        assertEq(r.amountOut, (uint256(4e10) * (DENOM - spread) * 2 * MID) / DENOM);
     }
 
     function testFuzz_TakerNeverBeatsMid(uint256 netIn) public view {
@@ -125,7 +149,7 @@ contract HumidiFiStrategyTest is StrategyTestBase {
         if (!r.valid) return;
         uint256 perfect = netIn * MID;
         assertLt(r.amountOut, perfect); // spread is always > 0
-        assertGe(r.amountOut, (perfect * DENOM) / (DENOM + 400_000)); // cap floor
+        assertGe(r.amountOut, (perfect * (DENOM - 400_000)) / DENOM); // cap floor
     }
 
     // ------------------------------------------------------------------
@@ -134,7 +158,7 @@ contract HumidiFiStrategyTest is StrategyTestBase {
 
     function test_CircuitBreakerHaltsAtThreshold() public {
         vm.prank(maker);
-        strat.setCircuitBreaker(book, 99); // degraded but quoting
+        strat.setCircuitBreaker(book, 99); // below the halt threshold
         assertTrue(amm.quoteExactInput(book, address(math0), 1e10).valid);
 
         vm.prank(maker);
@@ -144,7 +168,6 @@ contract HumidiFiStrategyTest is StrategyTestBase {
         assertFalse(r.valid);
         assertEq(uint8(r.reason), uint8(QuayTypes.QuoteReason.BookNotActive));
 
-        // Swap reverts while tripped; funds untouched by design.
         QuaySharedLiquidityAMM.SwapExactInputSingleParams memory p =
             _swapParams(book, address(math0), address(math1), 1e10, 0);
         math0.mint(taker, 1e10);
@@ -189,16 +212,6 @@ contract HumidiFiStrategyTest is StrategyTestBase {
         HumidiFiStrategy.Config memory c = _config();
         vm.startPrank(maker);
 
-        c.sqrtDiv = 0;
-        vm.expectRevert(ConfigurableStrategy.BadConfig.selector);
-        strat.setConfig(book, c);
-
-        c = _config();
-        c.linDiv = 0;
-        vm.expectRevert(ConfigurableStrategy.BadConfig.selector);
-        strat.setConfig(book, c);
-
-        c = _config();
         c.maxSpread = 0;
         vm.expectRevert(ConfigurableStrategy.BadConfig.selector);
         strat.setConfig(book, c);

@@ -7,15 +7,22 @@ import {ConfigurableStrategy} from "src/strategies/ConfigurableStrategy.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
 
 /// @title HumidiFiStrategy
-/// @notice EVM port of the HumidiFi pricing model (see quay-monorepo
-///         onchain/vm/research/humidifi-pricing-model.md): a spot pricer
-///         keyed off a keeper-pushed mid, with a smooth spread penalty,
-///         a discrete tier kick, a spread cap, and a circuit breaker.
+/// @notice EVM port of the HumidiFi pricing model (quay-monorepo
+///         onchain/vm/research: humidifi-decoder/src/simulator.rs is the
+///         authoritative flat-spread pricer confirmed by on-chain replay;
+///         humidifi-pricing-model.md adds the fitted sqrt/linear penalty and
+///         tier kick, which remain open RE points): a spot pricer keyed off a
+///         keeper-pushed mid with a taker-adverse spread and circuit breaker.
 ///
-/// Original closed form (spread in 1e-8 fraction units):
-///   total_spread = pool_base + isqrt(out / sqrt_div) + out / lin_div
-///   effective mid = mid * (DENOM + spread) / DENOM, applied against the taker
-///   plus a discrete +kick at a fixed input threshold and a hard size cliff.
+/// Authoritative settlement (simulator.rs): both directions multiply by
+///   factor = (DENOM - spread) / DENOM
+/// in a single fused floor division. The smooth penalty
+///   spread = base + isqrt(out / sqrt_div) + out / lin_div
+/// and the discrete +kick at an input threshold come from the fitted model
+/// (humidifi-pricing-model.md) and are optional here: setting sqrtDiv or
+/// linDiv to 0 disables that term, so the verified flat-spread regime is
+/// spread = baseSpread. The 40 bps max-spread cap mirrors state[48]; the
+/// original never demonstrably enforces it, so it is a defensive clamp.
 ///
 /// Mapping onto the venue:
 ///   - QuoteState.bidPxX128 carries the keeper-pushed mid (token1 atoms per
@@ -24,8 +31,8 @@ import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
 ///   - The circuit breaker (state[584] analog) lives in per-book config.
 ///   - No time decay: like the original, freshness is binary via validUntil.
 contract HumidiFiStrategy is IQuayStrategy, ConfigurableStrategy {
-    /// @dev Spread units are 1e-8 fractions, matching the original
-    ///      (base 62_116 units ~= 6.2 bps; cap 400_000 units = 40 bps).
+    /// @dev Spread units are 1e-8 fractions, matching the original's tier-fee
+    ///      encoding (base 62_116 units ~= 6.2 bps; cap 400_000 = 40 bps).
     uint256 public constant SPREAD_DENOM = 1e8;
 
     /// @dev Circuit-breaker threshold from the original: values >= 100 halt.
@@ -34,14 +41,15 @@ contract HumidiFiStrategy is IQuayStrategy, ConfigurableStrategy {
     struct Config {
         bool exists;
         uint8 circuitBreaker; // >= BREAKER_HALT halts quoting
-        uint64 baseSpread; // 1e-8 units
-        uint64 sqrtDiv; // divisor inside isqrt(out / sqrtDiv)
-        uint64 linDiv; // divisor of the linear term out / linDiv
+        uint64 baseSpread; // 1e-8 units; the flat-regime spread
+        uint64 sqrtDiv; // divisor inside isqrt(out / sqrtDiv); 0 disables
+        uint64 linDiv; // divisor of the linear term out / linDiv; 0 disables
         uint64 kickSpread; // 1e-8 units added at/above kickThreshold
         uint64 maxSpread; // spread cap, 1e-8 units
-        // Trade-size threshold in token0 atoms (the base-token quantity moved:
-        // input when selling token0, perfect output when selling token1).
-        // 0 disables the kick.
+        // Trade-size threshold in raw input atoms (the original's tier
+        // selector compares amount_in regardless of side, so the unit depends
+        // on trade direction — set it for the side that matters or use two
+        // books). 0 disables the kick.
         uint128 kickThreshold;
     }
 
@@ -65,7 +73,7 @@ contract HumidiFiStrategy is IQuayStrategy, ConfigurableStrategy {
     // ------------------------------------------------------------------
 
     function setConfig(bytes32 bookId, Config calldata c) external onlyBookOwner(bookId) {
-        if (!c.exists || c.sqrtDiv == 0 || c.linDiv == 0) revert BadConfig();
+        if (!c.exists) revert BadConfig();
         if (c.maxSpread == 0 || c.maxSpread >= SPREAD_DENOM) revert BadConfig();
         configs[bookId] = c;
         emit ConfigSet(
@@ -111,20 +119,24 @@ contract HumidiFiStrategy is IQuayStrategy, ConfigurableStrategy {
         if (netAmountIn == 0) return (0, 0, 0, QuoteReason.ZeroOutput);
 
         uint256 mid = q.bidPxX128;
+        if (mid == 0) return (0, 0, 0, QuoteReason.BadPrices); // ZeroMid analog
         uint256 outPerfect =
             token0In ? Math.mulDiv(netAmountIn, mid, Q128) : Math.mulDiv(netAmountIn, Q128, mid);
         if (outPerfect == 0) return (0, 0, 0, QuoteReason.ZeroOutput);
 
-        uint256 baseTokenAmount = token0In ? netAmountIn : outPerfect;
-        uint256 spread = _spreadUnits(c, baseTokenAmount, outPerfect);
+        uint256 spread = _spreadUnits(c, netAmountIn, outPerfect);
 
-        // Taker pays the inflated effective mid: out = perfect / (1 + spread).
-        amountOut = Math.mulDiv(outPerfect, SPREAD_DENOM, SPREAD_DENOM + spread);
+        // Authoritative convention: multiply by (DENOM - spread) / DENOM in a
+        // single fused floor division per direction (simulator.rs).
+        uint256 factor = SPREAD_DENOM - spread;
+        amountOut = token0In
+            ? Math.mulDiv(netAmountIn * factor, mid, Q128 * SPREAD_DENOM)
+            : Math.mulDiv(netAmountIn * factor, Q128, mid * SPREAD_DENOM);
         if (amountOut == 0) return (0, 0, 0, QuoteReason.ZeroOutput);
 
         appliedPriceX128 = token0In
-            ? Math.mulDiv(mid, SPREAD_DENOM, SPREAD_DENOM + spread)
-            : Math.mulDiv(mid, SPREAD_DENOM + spread, SPREAD_DENOM);
+            ? Math.mulDiv(mid, factor, SPREAD_DENOM)
+            : Math.mulDiv(mid, SPREAD_DENOM, factor);
         // Diagnostic: spread expressed in bps (1e-8 units / 1e4).
         // casting to 'uint32' is safe: spread <= maxSpread < 1e8, so /1e4 < 1e4
         // forge-lint: disable-next-line(unsafe-typecast)
@@ -133,14 +145,18 @@ contract HumidiFiStrategy is IQuayStrategy, ConfigurableStrategy {
     }
 
     /// @dev total_spread = base + isqrt(out / sqrtDiv) + out / linDiv
-    ///      (+ kick at the discrete base-token size threshold), capped.
-    function _spreadUnits(Config storage c, uint256 baseTokenAmount, uint256 outPerfect)
+    ///      (+ kick at the discrete input threshold), capped. The sqrt and
+    ///      linear terms are the fitted-model penalty; 0-divisors disable
+    ///      them, leaving the replay-verified flat spread.
+    function _spreadUnits(Config storage c, uint256 netAmountIn, uint256 outPerfect)
         internal
         view
         returns (uint256 spread)
     {
-        spread = uint256(c.baseSpread) + Math.sqrt(outPerfect / c.sqrtDiv) + outPerfect / c.linDiv;
-        if (c.kickThreshold != 0 && baseTokenAmount >= c.kickThreshold) {
+        spread = c.baseSpread;
+        if (c.sqrtDiv != 0) spread += Math.sqrt(outPerfect / c.sqrtDiv);
+        if (c.linDiv != 0) spread += outPerfect / c.linDiv;
+        if (c.kickThreshold != 0 && netAmountIn >= c.kickThreshold) {
             spread += c.kickSpread;
         }
         if (spread > c.maxSpread) spread = c.maxSpread;

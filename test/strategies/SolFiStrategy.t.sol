@@ -8,172 +8,200 @@ import {ConfigurableStrategy} from "src/strategies/ConfigurableStrategy.sol";
 import {SolFiStrategy} from "src/strategies/SolFiStrategy.sol";
 
 contract SolFiStrategyTest is StrategyTestBase {
+    uint256 internal constant PREC = 1e7;
+    uint256 internal constant MID = 100; // token1 atoms per token0 atom
+    uint32 internal constant RAMP = 25;
+    uint32 internal constant MAX_AGE = 200;
+
     SolFiStrategy internal strat;
     bytes32 internal book;
-
-    // Side-0 spline: sell math0. x = input atoms, y = output atoms.
-    uint128[] internal xs0 = [uint128(0), 1e12, 2e12, 4e12];
-    uint128[] internal ys0 = [uint128(0), 99e12, 190e12, 360e12];
-
-    // Side-1 spline: sell math1, flatter curve.
-    uint128[] internal xs1 = [uint128(0), 1e12];
-    uint128[] internal ys1 = [uint128(0), 5e11];
 
     function setUp() public override {
         super.setUp();
         strat = new SolFiStrategy(amm);
         _approveModule(address(strat));
         book = _newMathBook(address(strat), bytes32("SOLFI"));
-        _pushQuote(book, _midQuote(1, Q128)); // heartbeat; prices unused
+        _pushLongQuote(1);
 
-        vm.startPrank(maker);
-        strat.setSpline(book, 0, xs0, ys0);
-        strat.setSpline(book, 1, xs1, ys1);
-        vm.stopPrank();
-    }
-
-    // ------------------------------------------------------------------
-    // Spline math
-    // ------------------------------------------------------------------
-
-    function test_ExactAtControlPoints() public view {
-        assertEq(amm.quoteExactInput(book, address(math0), 1e12).amountOut, 99e12);
-        assertEq(amm.quoteExactInput(book, address(math0), 2e12).amountOut, 190e12);
-        assertEq(amm.quoteExactInput(book, address(math0), 4e12).amountOut, 360e12);
-    }
-
-    function test_InterpolatesBetweenPoints() public view {
-        // Segment [1e12, 2e12): 99e12 + 0.5e12 * (190e12 - 99e12) / 1e12
-        QuaySharedLiquidityAMM.QuoteResult memory r =
-            amm.quoteExactInput(book, address(math0), 15e11);
-        assertEq(r.amountOut, 99e12 + 455e11);
-        // Diagnostic price: out * Q128 / in.
-        assertEq(r.appliedPriceX128, (uint256(1445e11) << 128) / 15e11);
-    }
-
-    function test_SaturatesBeyondLastPoint() public view {
-        assertEq(amm.quoteExactInput(book, address(math0), 8e12).amountOut, 360e12);
-        assertEq(amm.quoteExactInput(book, address(math0), 1e18).amountOut, 360e12);
-    }
-
-    function test_FirstSegmentFromZero() public view {
-        // floor(7 * 99e12 / 1e12) = 693
-        assertEq(amm.quoteExactInput(book, address(math0), 7).amountOut, 693);
-    }
-
-    function test_SidesAreIndependent() public view {
-        assertEq(amm.quoteExactInput(book, address(math1), 1e12).amountOut, 5e11);
-        assertEq(amm.quoteExactInput(book, address(math1), 5e11).amountOut, 25e10);
-    }
-
-    function test_UnconfiguredSideRejects() public {
-        bytes32 half = _newMathBook(address(strat), bytes32("HALF"));
-        _pushQuote(half, _midQuote(1, Q128));
         vm.prank(maker);
-        strat.setSpline(half, 0, xs0, ys0);
-
-        assertTrue(amm.quoteExactInput(half, address(math0), 1e12).valid);
-        QuaySharedLiquidityAMM.QuoteResult memory r =
-            amm.quoteExactInput(half, address(math1), 1e12);
-        assertFalse(r.valid);
-        assertEq(uint8(r.reason), uint8(QuayTypes.QuoteReason.BadPrices));
+        strat.setConfig(book, _config(0));
     }
 
-    function testFuzz_OutputIsMonotone(uint256 a, uint256 b) public view {
-        a = bound(a, 1, 1e19);
-        b = bound(b, a, 1e19);
-        assertLe(
-            amm.quoteExactInput(book, address(math0), a).amountOut,
-            amm.quoteExactInput(book, address(math0), b).amountOut
+    /// @dev The freshness window outlives the venue default, so tests can walk
+    ///      the full 25s ramp and the 200s gate.
+    function _pushLongQuote(uint64 nonce) internal {
+        QuayTypes.QuoteState memory q = _midQuote(nonce, MID * Q128);
+        q.freshUntil = uint64(block.timestamp) + 300;
+        q.validUntil = uint64(block.timestamp) + 300;
+        _pushQuote(book, q);
+    }
+
+    function _config(uint32 feePpm7) internal pure returns (SolFiStrategy.Config memory) {
+        return SolFiStrategy.Config({
+            exists: true,
+            rampSeconds: RAMP, // the original's ~25-slot ramp
+            maxAgeSeconds: MAX_AGE, // the original's 200-slot window
+            feePpm7: feePpm7,
+            c1Fresh: 10_000_000, // hardcoded C_FRESH == fee precision
+            c1Stale: 9_950_000, // ~50 bps worse for the taker when stale
+            c0Fresh: 10_000_000,
+            c0Stale: 10_100_000 // sell side worsens by divisor growth
+        });
+    }
+
+    /// @dev The pinned interpolation, computed independently:
+    ///      C = (fresh*(ramp-clipped) + stale*clipped) / ramp.
+    function _c(uint256 fresh, uint256 stale, uint256 delta) internal pure returns (uint256) {
+        uint256 clipped = delta > RAMP ? RAMP : delta;
+        return (fresh * (RAMP - clipped) + stale * clipped) / RAMP;
+    }
+
+    // ------------------------------------------------------------------
+    // Slot-decay pricing
+    // ------------------------------------------------------------------
+
+    function test_FreshQuoteIsTight() public view {
+        // delta 0: C1 = C0 = PRECISION, fee 0 -> exact mid both ways.
+        QuaySharedLiquidityAMM.QuoteResult memory r =
+            amm.quoteExactInput(book, address(math1), 1e12);
+        assertEq(r.amountOut, 1e10); // netIn / mid
+        assertEq(r.appliedDecayBps, 0);
+
+        r = amm.quoteExactInput(book, address(math0), 1e12);
+        assertEq(r.amountOut, 1e14); // netIn * mid
+    }
+
+    function test_MidRampInterpolatesExactly() public {
+        vm.warp(START + 10); // clipped 10 of 25
+        // C1 = (1e7*15 + 9_950_000*10)/25 = 9_980_000
+        QuaySharedLiquidityAMM.QuoteResult memory r =
+            amm.quoteExactInput(book, address(math1), 1e12);
+        assertEq(r.amountOut, (uint256(1e12) * 9_980_000) / (MID * PREC));
+        assertEq(r.appliedDecayBps, 4000); // 10/25 of the ramp in bps
+
+        // C0 = (1e7*15 + 10_100_000*10)/25 = 10_040_000
+        r = amm.quoteExactInput(book, address(math0), 1_004e9);
+        assertEq(r.amountOut, (uint256(1_004e9) * MID * PREC) / 10_040_000);
+        assertEq(r.amountOut, 1e14); // chosen to divide exactly
+    }
+
+    function test_EveryRampStepMatchesReference() public {
+        for (uint256 d = 0; d <= RAMP; d++) {
+            vm.warp(START + d);
+            uint256 out = amm.quoteExactInput(book, address(math1), 1e12).amountOut;
+            uint256 expected = (uint256(1e12) * _c(10_000_000, 9_950_000, d)) / (MID * PREC);
+            assertEq(out, expected);
+        }
+    }
+
+    function test_StalePlateauHolds() public {
+        vm.warp(START + 30); // past the 25s ramp, inside the 200s window
+        QuaySharedLiquidityAMM.QuoteResult memory r =
+            amm.quoteExactInput(book, address(math1), 1e12);
+        assertEq(r.amountOut, (uint256(1e12) * 9_950_000) / (MID * PREC));
+        assertEq(r.appliedDecayBps, 10_000); // stale plateau
+
+        vm.warp(START + 150); // same plateau much later
+        assertEq(
+            amm.quoteExactInput(book, address(math1), 1e12).amountOut,
+            (uint256(1e12) * 9_950_000) / (MID * PREC)
         );
+    }
+
+    function test_HardFreshnessGate() public {
+        vm.warp(START + MAX_AGE - 1);
+        assertTrue(amm.quoteExactInput(book, address(math1), 1e12).valid);
+
+        vm.warp(START + MAX_AGE); // strict < boundary, 0x83 analog
+        QuaySharedLiquidityAMM.QuoteResult memory r =
+            amm.quoteExactInput(book, address(math1), 1e12);
+        assertFalse(r.valid);
+        assertEq(uint8(r.reason), uint8(QuayTypes.QuoteReason.QuoteExpired));
+
+        // A refresh re-arms the gate.
+        _pushLongQuote(2);
+        assertTrue(amm.quoteExactInput(book, address(math1), 1e12).valid);
+    }
+
+    function test_LinearFeeApplies() public {
+        vm.prank(maker);
+        strat.setConfig(book, _config(1_000_000)); // 10% in 1e-7 units
+
+        assertEq(amm.quoteExactInput(book, address(math1), 1e12).amountOut, 9e9);
+        assertEq(amm.quoteExactInput(book, address(math0), 1e12).amountOut, 9e13);
+    }
+
+    function test_MidComesFromQuotePipeline() public {
+        QuayTypes.QuoteState memory q = _midQuote(2, 2 * MID * Q128);
+        _pushQuote(book, q);
+        assertEq(amm.quoteExactInput(book, address(math0), 1e12).amountOut, 2e14);
+    }
+
+    function testFuzz_StalenessOnlyWorsensBothSides(uint256 d1, uint256 d2) public {
+        d1 = bound(d1, 0, MAX_AGE - 1);
+        d2 = bound(d2, d1, MAX_AGE - 1);
+
+        vm.warp(START + d1);
+        uint256 buy1 = amm.quoteExactInput(book, address(math1), 1e12).amountOut;
+        uint256 sell1 = amm.quoteExactInput(book, address(math0), 1e12).amountOut;
+        vm.warp(START + d2);
+        assertLe(amm.quoteExactInput(book, address(math1), 1e12).amountOut, buy1);
+        assertLe(amm.quoteExactInput(book, address(math0), 1e12).amountOut, sell1);
     }
 
     // ------------------------------------------------------------------
     // Config governance
     // ------------------------------------------------------------------
 
-    function test_SetSpline_RevertStranger() public {
+    function test_Unconfigured() public {
+        bytes32 bare = _newMathBook(address(strat), bytes32("BARE"));
+        _pushQuote(bare, _midQuote(1, MID * Q128));
+        QuaySharedLiquidityAMM.QuoteResult memory r =
+            amm.quoteExactInput(bare, address(math0), 1e12);
+        assertEq(uint8(r.reason), uint8(QuayTypes.QuoteReason.BadPrices));
+    }
+
+    function test_SetConfig_RevertStranger() public {
         vm.prank(taker);
         vm.expectRevert(ConfigurableStrategy.NotBookOwner.selector);
-        strat.setSpline(book, 0, xs0, ys0);
+        strat.setConfig(book, _config(0));
     }
 
-    function test_SetSpline_ProtocolOwnerAllowed() public {
-        vm.prank(protocolOwner);
-        strat.setSpline(book, 0, xs0, ys0);
-    }
-
-    function test_SetSpline_RevertUnknownBook() public {
-        vm.prank(maker);
-        vm.expectRevert(ConfigurableStrategy.NotBookOwner.selector);
-        strat.setSpline(bytes32("nope"), 0, xs0, ys0);
-    }
-
-    function test_SetSpline_Validation() public {
-        uint128[] memory x = new uint128[](2);
-        uint128[] memory y = new uint128[](2);
-
+    function test_SetConfig_Validation() public {
+        SolFiStrategy.Config memory c = _config(0);
         vm.startPrank(maker);
-        vm.expectRevert(ConfigurableStrategy.BadConfig.selector);
-        strat.setSpline(book, 2, xs0, ys0); // bad side
 
+        c.rampSeconds = 0;
         vm.expectRevert(ConfigurableStrategy.BadConfig.selector);
-        strat.setSpline(book, 0, new uint128[](0), new uint128[](0)); // empty
+        strat.setConfig(book, c);
 
+        c = _config(0);
+        c.maxAgeSeconds = 0;
         vm.expectRevert(ConfigurableStrategy.BadConfig.selector);
-        strat.setSpline(book, 0, new uint128[](9), new uint128[](9)); // too long
+        strat.setConfig(book, c);
 
+        c = _config(uint32(PREC)); // fee == precision
         vm.expectRevert(ConfigurableStrategy.BadConfig.selector);
-        strat.setSpline(book, 0, x, new uint128[](3)); // length mismatch
+        strat.setConfig(book, c);
 
-        x[0] = 1; // x[0] must be 0
-        x[1] = 2;
+        c = _config(0);
+        c.c1Stale = 0;
         vm.expectRevert(ConfigurableStrategy.BadConfig.selector);
-        strat.setSpline(book, 0, x, y);
+        strat.setConfig(book, c);
 
-        x[0] = 0;
-        x[1] = 0; // x not strictly increasing
+        c = _config(0);
+        c.exists = false;
         vm.expectRevert(ConfigurableStrategy.BadConfig.selector);
-        strat.setSpline(book, 0, x, y);
-
-        x[1] = 5;
-        y[0] = 10;
-        y[1] = 9; // y decreasing
-        vm.expectRevert(ConfigurableStrategy.BadConfig.selector);
-        strat.setSpline(book, 0, x, y);
+        strat.setConfig(book, c);
         vm.stopPrank();
-    }
-
-    function test_GetSplineRoundTrip() public view {
-        (uint128[] memory x, uint128[] memory y) = strat.getSpline(book, 0);
-        assertEq(x.length, 4);
-        for (uint256 i = 0; i < 4; i++) {
-            assertEq(x[i], xs0[i]);
-            assertEq(y[i], ys0[i]);
-        }
     }
 
     // ------------------------------------------------------------------
     // Venue integration
     // ------------------------------------------------------------------
 
-    function test_SwapSettlesAtSplinePrice() public {
-        uint256 out =
-            _swapAs(taker, _swapParams(book, address(math0), address(math1), 15e11, 1445e11));
-        assertEq(out, 1445e11);
-        assertEq(math1.balanceOf(recipient), 1445e11);
-    }
-
-    function test_HeartbeatExpiryStillGates() public {
-        vm.warp(START + VALID_SECONDS + 1);
-        QuaySharedLiquidityAMM.QuoteResult memory r =
-            amm.quoteExactInput(book, address(math0), 1e12);
-        assertFalse(r.valid);
-        assertEq(uint8(r.reason), uint8(QuayTypes.QuoteReason.QuoteExpired));
-    }
-
     function test_SizeCapsStillApply() public {
-        QuayTypes.QuoteState memory q = _midQuote(2, Q128);
+        QuayTypes.QuoteState memory q = _midQuote(2, MID * Q128);
         q.maxIn0 = 1e12;
         _pushQuote(book, q);
 
@@ -182,12 +210,24 @@ contract SolFiStrategyTest is StrategyTestBase {
         assertEq(uint8(r.reason), uint8(QuayTypes.QuoteReason.SizeExceeded));
     }
 
-    function testFuzz_QuoteMatchesSwap(uint256 amountIn) public {
-        amountIn = bound(amountIn, 1e6, 4e12);
+    function test_SwapSettlesAtQuotedAmount() public {
+        vm.warp(START + 7); // mid-ramp
         QuaySharedLiquidityAMM.QuoteResult memory q =
-            amm.quoteExactInput(book, address(math0), amountIn);
+            amm.quoteExactInput(book, address(math1), 1e12);
+        uint256 out =
+            _swapAs(taker, _swapParams(book, address(math1), address(math0), 1e12, q.amountOut));
+        assertEq(out, q.amountOut);
+    }
+
+    function testFuzz_QuoteMatchesSwap(uint256 amountIn, uint256 age) public {
+        amountIn = bound(amountIn, 1e6, 1e18);
+        age = bound(age, 0, 60);
+        vm.warp(START + age);
+
+        QuaySharedLiquidityAMM.QuoteResult memory q =
+            amm.quoteExactInput(book, address(math1), amountIn);
         assertTrue(q.valid);
-        uint256 out = _swapAs(taker, _swapParams(book, address(math0), address(math1), amountIn, 0));
+        uint256 out = _swapAs(taker, _swapParams(book, address(math1), address(math0), amountIn, 0));
         assertEq(out, q.amountOut);
     }
 }

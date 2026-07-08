@@ -7,34 +7,57 @@ import {ConfigurableStrategy} from "src/strategies/ConfigurableStrategy.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
 
 /// @title SolFiStrategy
-/// @notice EVM port of the SolFi pricing model (see quay-monorepo
-///         onchain/vm/research/SOLFI_REPLICATION_REPORT.md): the price curve
-///         is a piecewise-linear spline of up to 8 control points per side.
-///         There is no keeper-pushed mid — the spline IS the curve, and the
-///         maker reprices by rewriting it.
+/// @notice EVM port of the SolFi pricing model as pinned by the round-4/5 RE
+///         (quay-monorepo onchain/vm/research/solfi-decoder/
+///         Y_AXIS_FORMULA_PINNED.md and the BPF-parity-tested solfi_clone):
+///         a slot-decay quote model. The maker posts a mid; a side-specific
+///         multiplier C interpolates linearly from a fresh value to a stale
+///         value over a ramp window, then a linear fee applies. The account's
+///         splines are dormant on the calibrated path and are not ported.
 ///
-/// Spline semantics (identical to the original's validators):
-///   - x[] are input-amount thresholds: x[0] == 0, strictly increasing
-///   - y[] are output amounts at those inputs: monotonically non-decreasing
-///   - between points the output is linearly interpolated
-///   - beyond x[n-1] the output saturates at y[n-1]
+/// Original math (FEE_PRECISION = 1e7):
+///   delta      = clock.slot - last_update_slot; reject at delta >= max gate
+///   C(delta)   = (C_fresh * (ramp - clipped) + C_stale * clipped) / ramp,
+///                clipped = min(delta, ramp)
+///   out_base   = in_quote * C1(delta) / mid_denom * (1e7 - fee) / 1e7
+///   out_quote  = in_base * mid_denom / C0(delta) * (1e7 - fee) / 1e7
 ///
-/// Venue interplay: QuoteState's bid/ask are unused for pricing (post any
-/// nonzero heartbeat values); maxIn0/maxIn1 still cap per-side size, and the
-/// quote's validUntil provides the freshness gate.
+/// Mapping onto the venue (slots become seconds):
+///   - QuoteState.bidPxX128 carries the mid (token1 atoms per token0 atom,
+///     Q128) — the mid_denom analog, refreshed through updateQuote.
+///   - delta = block.timestamp - q.updatedAt (venue-stamped).
+///   - Settlement uses one fused floor division per side, mirroring the
+///     original's single-truncation settlement.
+///   - c0 scales the sell-token0 side (values above PRECISION worsen the
+///     taker); c1 scales the sell-token1 side (values below PRECISION worsen
+///     the taker). Fresh-vs-stale pairs express the toxicity-defense ramp:
+///     tight spread right after a refresh, wide when the quote ages.
 contract SolFiStrategy is IQuayStrategy, ConfigurableStrategy {
-    uint256 internal constant MAX_POINTS = 8;
+    uint256 public constant PRECISION = 1e7; // FEE_PRECISION analog
 
-    struct Spline {
-        uint8 n; // number of control points; 0 = unconfigured
-        uint128[MAX_POINTS] x;
-        uint128[MAX_POINTS] y;
+    struct Config {
+        bool exists;
+        uint32 rampSeconds; // C interpolation window (original: ~25 slots)
+        uint32 maxAgeSeconds; // hard freshness gate (original: 200 slots)
+        uint32 feePpm7; // linear fee in 1e-7 units (original state[304])
+        uint64 c1Fresh; // sell-token1 multiplier at delta = 0
+        uint64 c1Stale; // sell-token1 multiplier at delta >= ramp
+        uint64 c0Fresh; // sell-token0 divisor at delta = 0
+        uint64 c0Stale; // sell-token0 divisor at delta >= ramp
     }
 
-    /// @dev side 0 = taker sells token0, side 1 = taker sells token1.
-    mapping(bytes32 bookId => Spline[2]) internal splines;
+    mapping(bytes32 bookId => Config) public configs;
 
-    event SplineSet(bytes32 indexed bookId, uint8 side, uint128[] x, uint128[] y);
+    event ConfigSet(
+        bytes32 indexed bookId,
+        uint32 rampSeconds,
+        uint32 maxAgeSeconds,
+        uint32 feePpm7,
+        uint64 c1Fresh,
+        uint64 c1Stale,
+        uint64 c0Fresh,
+        uint64 c0Stale
+    );
 
     constructor(QuaySharedLiquidityAMM venue_) ConfigurableStrategy(venue_) {}
 
@@ -42,41 +65,21 @@ contract SolFiStrategy is IQuayStrategy, ConfigurableStrategy {
     // Maker configuration
     // ------------------------------------------------------------------
 
-    function setSpline(bytes32 bookId, uint8 side, uint128[] calldata xs, uint128[] calldata ys)
-        external
-        onlyBookOwner(bookId)
-    {
-        uint256 n = xs.length;
-        if (side > 1 || n == 0 || n > MAX_POINTS || ys.length != n) revert BadConfig();
-        if (xs[0] != 0) revert BadConfig();
-        for (uint256 i = 1; i < n; i++) {
-            if (xs[i] <= xs[i - 1]) revert BadConfig(); // x strictly increasing
-            if (ys[i] < ys[i - 1]) revert BadConfig(); // y monotone non-decreasing
-        }
-
-        Spline storage s = splines[bookId][side];
-        // casting to 'uint8' is safe: n <= MAX_POINTS == 8 was checked above
-        // forge-lint: disable-next-line(unsafe-typecast)
-        s.n = uint8(n);
-        for (uint256 i = 0; i < n; i++) {
-            s.x[i] = xs[i];
-            s.y[i] = ys[i];
-        }
-        emit SplineSet(bookId, side, xs, ys);
-    }
-
-    function getSpline(bytes32 bookId, uint8 side)
-        external
-        view
-        returns (uint128[] memory xs, uint128[] memory ys)
-    {
-        Spline storage s = splines[bookId][side];
-        xs = new uint128[](s.n);
-        ys = new uint128[](s.n);
-        for (uint256 i = 0; i < s.n; i++) {
-            xs[i] = s.x[i];
-            ys[i] = s.y[i];
-        }
+    function setConfig(bytes32 bookId, Config calldata c) external onlyBookOwner(bookId) {
+        bool bad = !c.exists || c.rampSeconds == 0 || c.maxAgeSeconds == 0 || c.feePpm7 >= PRECISION
+            || c.c1Fresh == 0 || c.c1Stale == 0 || c.c0Fresh == 0 || c.c0Stale == 0;
+        if (bad) revert BadConfig();
+        configs[bookId] = c;
+        emit ConfigSet(
+            bookId,
+            c.rampSeconds,
+            c.maxAgeSeconds,
+            c.feePpm7,
+            c.c1Fresh,
+            c.c1Stale,
+            c.c0Fresh,
+            c.c0Stale
+        );
     }
 
     // ------------------------------------------------------------------
@@ -89,41 +92,64 @@ contract SolFiStrategy is IQuayStrategy, ConfigurableStrategy {
         bool token0In,
         uint256 amountIn,
         uint256 netAmountIn,
-        uint256 /* availableOut: core enforces the inventory bound */
-    ) external view returns (uint256 amountOut, uint256 appliedPriceX128, uint32, QuoteReason) {
+        uint256 /* availableOut: no size dependence on the calibrated path */
+    ) external view returns (uint256, uint256, uint32, QuoteReason) {
+        Config storage c = configs[bookId];
+        if (!c.exists) return (0, 0, 0, QuoteReason.BadPrices);
+
+        // Hard freshness gate (custom error 0x83 analog), strict < boundary.
+        uint256 delta = block.timestamp - q.updatedAt;
+        if (delta >= c.maxAgeSeconds) return (0, 0, 0, QuoteReason.QuoteExpired);
+
         if (token0In && amountIn > uint256(q.maxIn0)) {
             return (0, 0, 0, QuoteReason.SizeExceeded);
         }
         if (!token0In && amountIn > uint256(q.maxIn1)) {
             return (0, 0, 0, QuoteReason.SizeExceeded);
         }
-        if (netAmountIn == 0) return (0, 0, 0, QuoteReason.ZeroOutput);
+        if (netAmountIn == 0 || q.bidPxX128 == 0) return (0, 0, 0, QuoteReason.ZeroOutput);
 
-        Spline storage s = splines[bookId][token0In ? 0 : 1];
-        if (s.n == 0) return (0, 0, 0, QuoteReason.BadPrices);
-
-        amountOut = _lerp(s, netAmountIn);
+        uint256 clipped = delta > c.rampSeconds ? c.rampSeconds : delta;
+        uint256 amountOut = _settle(c, q.bidPxX128, token0In, netAmountIn, clipped);
         if (amountOut == 0) return (0, 0, 0, QuoteReason.ZeroOutput);
 
-        appliedPriceX128 = token0In
-            ? Math.mulDiv(amountOut, Q128, netAmountIn)  // token1 per token0
+        uint256 appliedPriceX128 = token0In
+            ? Math.mulDiv(amountOut, Q128, netAmountIn)
             : Math.mulDiv(netAmountIn, Q128, amountOut);
-        return (amountOut, appliedPriceX128, 0, QuoteReason.OK);
+        // Diagnostic: ramp progress in bps (0 = fresh, 10_000 = stale plateau).
+        // casting to 'uint32' is safe: clipped <= rampSeconds, so the ratio <= 1e4
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint32 rampBps = uint32((clipped * 10_000) / c.rampSeconds);
+        return (amountOut, appliedPriceX128, rampBps, QuoteReason.OK);
     }
 
-    /// @dev Saturating piecewise-linear interpolation, floor rounding —
-    ///      out = y[i] + (key - x[i]) * (y[i+1] - y[i]) / (x[i+1] - x[i]).
-    function _lerp(Spline storage s, uint256 key) internal view returns (uint256) {
-        uint256 n = s.n;
-        if (key >= s.x[n - 1]) return s.y[n - 1];
-
-        // key >= x[0] == 0 always holds, so a containing segment exists.
-        uint256 i = 0;
-        while (i + 1 < n && key >= s.x[i + 1]) {
-            i++;
+    /// @dev Single fused floor division per side.
+    function _settle(
+        Config storage c,
+        uint256 mid,
+        bool token0In,
+        uint256 netAmountIn,
+        uint256 clipped
+    ) internal view returns (uint256) {
+        uint256 feeFactor = PRECISION - c.feePpm7;
+        if (token0In) {
+            // out = in * mid / Q128 * PRECISION / C0 * feeFactor / PRECISION.
+            uint256 c0 = _interpolate(c.c0Fresh, c.c0Stale, clipped, c.rampSeconds);
+            return Math.mulDiv(netAmountIn * feeFactor, mid, Q128 * c0);
         }
-        uint256 x0 = s.x[i];
-        uint256 y0 = s.y[i];
-        return y0 + Math.mulDiv(key - x0, s.y[i + 1] - y0, s.x[i + 1] - x0);
+        // out = in * Q128 / mid * C1 / PRECISION * feeFactor / PRECISION.
+        uint256 c1 = _interpolate(c.c1Fresh, c.c1Stale, clipped, c.rampSeconds);
+        return Math.mulDiv(netAmountIn * feeFactor, c1 * Q128, mid * PRECISION * PRECISION);
+    }
+
+    /// @dev C(delta) = (fresh * (ramp - clipped) + stale * clipped) / ramp —
+    ///      the original's all-unsigned exact interpolation; works whether the
+    ///      stale value is above or below the fresh one.
+    function _interpolate(uint256 fresh, uint256 stale, uint256 clipped, uint256 ramp)
+        internal
+        pure
+        returns (uint256)
+    {
+        return (fresh * (ramp - clipped) + stale * clipped) / ramp;
     }
 }
