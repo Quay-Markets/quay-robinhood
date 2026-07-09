@@ -10,9 +10,10 @@ contract QuoteUpdateTest is QuayTestBase {
         QuayTypes.QuoteState memory q = _wethQuote(2);
         q.updatedAt = 123; // must be ignored and replaced by block.timestamp
 
-        vm.expectEmit(true, false, false, true, address(amm));
+        vm.expectEmit(true, true, false, true, address(amm));
         emit QuaySharedLiquidityAMM.QuoteUpdated(
             wethBook,
+            updater,
             2,
             uint64(block.timestamp),
             q.freshUntil,
@@ -156,5 +157,14 @@ contract QuoteUpdateTest is QuayTestBase {
         vm.prank(updater);
         amm.updateQuote(wethBook, _wethQuote(2));
         assertEq(amm.getQuoteState(wethBook).nonce, 2);
+    }
+
+    function test_UpdateQuote_RevertClosedBook() public {
+        // Closed is terminal: no further quote events on the book.
+        vm.prank(maker);
+        amm.setBookStatus(wethBook, QuaySharedLiquidityAMM.BookStatus.Closed);
+        vm.prank(updater);
+        vm.expectRevert(QuaySharedLiquidityAMM.BookClosed.selector);
+        amm.updateQuote(wethBook, _wethQuote(2));
     }
 }

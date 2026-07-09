@@ -74,6 +74,11 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         address author;
         uint64 registeredAt;
         StrategyStatus status;
+        /// @dev extcodehash at registration; lets reviewers pin the audited
+        ///      bytecode. Modules must be non-upgradeable — a proxy keeps its
+        ///      codehash while swapping implementations, so proxies are
+        ///      rejected at review time.
+        bytes32 codehash;
     }
 
     struct LiquidityGroup {
@@ -156,6 +161,10 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
 
     /// @notice Addresses allowed to register new strategy modules.
     mapping(address author => bool) public isStrategyAuthor;
+
+    /// @notice Owner-curated ERC-20 allowlist; books can only be created on
+    ///         allowed tokens.
+    mapping(address token => bool) public isTokenAllowed;
     mapping(address module => StrategyInfo) public strategies;
 
     mapping(bytes32 bookId => mapping(address updater => bool)) public isUpdater;
@@ -190,7 +199,10 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         uint256 priceScale
     );
     event StrategyAuthorSet(address indexed author, bool allowed);
-    event StrategyRegistered(address indexed module, address indexed author);
+    event StrategyRegistered(
+        address indexed module, address indexed author, bytes32 indexed codehash
+    );
+    event TokenAllowedSet(address indexed token, bool allowed);
     event StrategyStatusChanged(
         address indexed module,
         StrategyStatus oldStatus,
@@ -200,6 +212,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
 
     event QuoteUpdated(
         bytes32 indexed bookId,
+        address indexed updater,
         uint64 nonce,
         uint64 updatedAt,
         uint64 freshUntil,
@@ -263,6 +276,8 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
     error StrategyNotRegistered();
     error StrategyNotApprovedError();
     error StrategyRetiredError();
+    error StrategyApprovedError();
+    error TokenNotAllowed();
     error StaleQuoteNonce();
     error DeadlineExpired();
     error QuoteInvalid(QuoteReason reason);
@@ -313,9 +328,10 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         strategies[module] = StrategyInfo({
             author: msg.sender,
             registeredAt: uint64(block.timestamp),
-            status: StrategyStatus.Registered
+            status: StrategyStatus.Registered,
+            codehash: module.codehash
         });
-        emit StrategyRegistered(module, msg.sender);
+        emit StrategyRegistered(module, msg.sender, module.codehash);
         emit StrategyStatusChanged(
             module, StrategyStatus.None, StrategyStatus.Registered, msg.sender
         );
@@ -333,14 +349,30 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
     }
 
     /// @notice Authors (or the owner) can permanently withdraw a module. Terminal.
+    ///         An Approved module cannot be retired directly: live books rely
+    ///         on it, so the owner must Block it first (giving books time to
+    ///         migrate) before retirement.
     function retireStrategy(address module) external {
         StrategyInfo storage s = strategies[module];
         if (s.status == StrategyStatus.None) revert StrategyNotRegistered();
         if (msg.sender != s.author && msg.sender != owner()) revert NotStrategyAuthor();
         if (s.status == StrategyStatus.Retired) revert StrategyRetiredError();
+        if (s.status == StrategyStatus.Approved) revert StrategyApprovedError();
         StrategyStatus old = s.status;
         s.status = StrategyStatus.Retired;
         emit StrategyStatusChanged(module, old, StrategyStatus.Retired, msg.sender);
+    }
+
+    // ------------------------------------------------------------------
+    // Token allowlist — only canonical, hook-free, exact-transfer ERC-20s
+    // may back books (design doc §14.2; also blocks fake stock-token
+    // contracts on Robinhood Chain).
+    // ------------------------------------------------------------------
+
+    function setTokenAllowed(address token, bool allowed) external onlyOwner {
+        if (token == address(0) || token.code.length == 0) revert InvalidAddress();
+        isTokenAllowed[token] = allowed;
+        emit TokenAllowedSet(token, allowed);
     }
 
     function createLiquidityGroup(bytes32 liquidityGroupId, address groupOwner) external onlyOwner {
@@ -366,6 +398,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         if (token0 == address(0) || token1 == address(0) || token0 == token1) {
             revert InvalidAddress();
         }
+        if (!isTokenAllowed[token0] || !isTokenAllowed[token1]) revert TokenNotAllowed();
         if (!liquidityGroups[liquidityGroupId].exists) revert InvalidGroup();
         if (protocolFeeBps > BPS) revert BadFee();
         if (strategies[strategyModule].status != StrategyStatus.Approved) {
@@ -438,14 +471,21 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
 
     /// @notice Attach or detach a reference-price guard for a book.
     ///         While attached, quoting requires a fresh, positive feed answer
-    ///         whose scaled price is within maxDeviationBps of the quote mid.
+    ///         and the quote's EFFECTIVE executed price (derived from actual
+    ///         input/output, so decay and strategy skew are included) must stay
+    ///         within maxDeviationBps of the scaled reference.
+    ///         Protocol-owner only: the guard is a venue-level safety promise
+    ///         to aggregators, so makers cannot loosen or disable it.
     function setBookOracle(
         bytes32 bookId,
         address feed,
         uint32 maxAge,
         uint16 maxDeviationBps,
         uint256 priceScale
-    ) external onlyBookGroupOwnerOrProtocol(bookId) {
+    ) external onlyOwner {
+        if (books[bookId].status == BookStatus.Uninitialized) {
+            revert InvalidBook();
+        }
         if (feed != address(0)) {
             bool badParams = maxAge == 0 || priceScale == 0 || maxDeviationBps == 0
                 || maxDeviationBps > BPS || feed.code.length == 0;
@@ -486,10 +526,12 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         );
     }
 
+    /// @notice Group-owner only: the protocol owner must never be able to
+    ///         move maker inventory (protocol fees have their own path).
     function withdraw(bytes32 liquidityGroupId, address token, uint256 amount, address to)
         external
         nonReentrant
-        onlyGroupOwnerOrProtocol(liquidityGroupId)
+        onlyGroupOwner(liquidityGroupId)
     {
         if (token == address(0) || to == address(0) || amount == 0) {
             revert InvalidAddress();
@@ -527,7 +569,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
     /// @notice Direct quote update by an authorized updater EOA.
     function updateQuote(bytes32 bookId, QuoteState calldata q) external {
         if (!isUpdater[bookId][msg.sender]) revert NotUpdater();
-        _validateAndStoreQuote(bookId, q);
+        _validateAndStoreQuote(bookId, q, msg.sender);
     }
 
     /// @notice Relay a quote update signed (EIP-712) by an authorized updater.
@@ -538,7 +580,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
     {
         address signer = ECDSA.recover(hashQuoteUpdate(bookId, q), signature);
         if (!isUpdater[bookId][signer]) revert NotUpdater();
-        _validateAndStoreQuote(bookId, q);
+        _validateAndStoreQuote(bookId, q, signer);
     }
 
     /// @notice Relay several signed quote updates in one transaction.
@@ -553,7 +595,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         for (uint256 i = 0; i < bookIds.length; i++) {
             address signer = ECDSA.recover(hashQuoteUpdate(bookIds[i], quotes[i]), signatures[i]);
             if (!isUpdater[bookIds[i]][signer]) revert NotUpdater();
-            _validateAndStoreQuote(bookIds[i], quotes[i]);
+            _validateAndStoreQuote(bookIds[i], quotes[i], signer);
         }
     }
 
@@ -580,8 +622,14 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         );
     }
 
-    function _validateAndStoreQuote(bytes32 bookId, QuoteState calldata q) internal {
-        if (books[bookId].status == BookStatus.Uninitialized) revert InvalidBook();
+    function _validateAndStoreQuote(bytes32 bookId, QuoteState calldata q, address updater)
+        internal
+    {
+        BookStatus st = books[bookId].status;
+        if (st == BookStatus.Uninitialized) revert InvalidBook();
+        // Closed is terminal: no more quote events. Paused books may keep
+        // streaming so prices are warm when the maker unpauses.
+        if (st == BookStatus.Closed) revert BookClosed();
         if (q.bidPxX128 == 0 || q.askPxX128 < q.bidPxX128) revert BadQuote();
         if (q.freshUntil > q.validUntil) revert BadQuote();
         if (q.validUntil < block.timestamp) revert BadQuote();
@@ -604,6 +652,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
 
         emit QuoteUpdated(
             bookId,
+            updater,
             s.nonce,
             s.updatedAt,
             s.freshUntil,
@@ -658,19 +707,30 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         }
     }
 
-    /// @notice Diagnostic quote that ignores the inventory check when liquidity is
-    ///         insufficient, so SDKs can still display the theoretical price.
-    ///         A result can therefore be valid=true while availableOut < amountOut;
-    ///         it must never be used to build a swap.
-    function quotePriceOnly(bytes32 bookId, address tokenIn, uint256 amountIn)
-        external
-        view
-        returns (QuoteResult memory r)
-    {
-        r = _quoteExactInput(bookId, tokenIn, amountIn);
-        if (r.reason == QuoteReason.InsufficientLiquidity) {
-            r = _quoteExactInputNoInventoryCheck(bookId, tokenIn, amountIn);
-            r.availableOut = inventory[r.liquidityGroupId][r.tokenOut];
+    /// @notice Paginated variant of quoteBestExactInput for pairs with many
+    ///         books; scans ids[start .. start+limit). Serious routers should
+    ///         instead pick candidates off-chain via getBooksForPair +
+    ///         getBookStates + batchQuoteExactInput.
+    function quoteBestExactInputPaged(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 start,
+        uint256 limit
+    ) external view returns (QuoteResult memory best) {
+        bytes32[] storage ids = booksByPair[_pairKey(tokenIn, tokenOut)];
+        best.reason = QuoteReason.BookMissing;
+        best.tokenIn = tokenIn;
+        best.tokenOut = tokenOut;
+        best.amountIn = amountIn;
+
+        uint256 end = start + limit;
+        if (end > ids.length) end = ids.length;
+        for (uint256 i = start; i < end; i++) {
+            QuoteResult memory r = _quoteExactInput(ids[i], tokenIn, amountIn);
+            if (r.valid && r.tokenOut == tokenOut && r.amountOut > best.amountOut) {
+                best = r;
+            }
         }
     }
 
@@ -686,8 +746,29 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         return allBookIds;
     }
 
+    /// @notice Historical list: every updater ever set for the book,
+    ///         including deactivated ones. Use getActiveUpdaters for the
+    ///         "which EOAs push prices" aggregator question.
     function getUpdaters(bytes32 bookId) external view returns (address[] memory) {
         return updaterList[bookId];
+    }
+
+    /// @notice Currently authorized updater EOAs for a book.
+    function getActiveUpdaters(bytes32 bookId) external view returns (address[] memory active) {
+        address[] storage all = updaterList[bookId];
+
+        uint256 count = 0;
+        for (uint256 i = 0; i < all.length; i++) {
+            if (isUpdater[bookId][all[i]]) count++;
+        }
+
+        active = new address[](count);
+        uint256 j = 0;
+        for (uint256 i = 0; i < all.length; i++) {
+            if (isUpdater[bookId][all[i]]) {
+                active[j++] = all[i];
+            }
+        }
     }
 
     function getQuoteState(bytes32 bookId) external view returns (QuoteState memory) {
@@ -872,10 +953,16 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
             return _invalid(r, QuoteReason.StrategyNotApproved);
         }
 
-        OracleConfig storage oc = oracleConfigs[bookId];
-        if (oc.feed != address(0)) {
-            QuoteReason oracleReason = _checkOracle(oc, q);
-            if (oracleReason != QuoteReason.OK) return _invalid(r, oracleReason);
+        // Oracle guard, part 1: resolve the reference price up front so a
+        // dead/stale feed fails fast, before the strategy runs.
+        uint256 refPxX128 = 0;
+        {
+            OracleConfig storage oc = oracleConfigs[bookId];
+            if (oc.feed != address(0)) {
+                QuoteReason oracleReason;
+                (refPxX128, oracleReason) = _oracleReference(oc);
+                if (oracleReason != QuoteReason.OK) return _invalid(r, oracleReason);
+            }
         }
 
         r.quoteNonce = q.nonce;
@@ -912,17 +999,34 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
 
         if (r.amountOut == 0) return _invalid(r, QuoteReason.ZeroOutput);
 
+        // Oracle guard, part 2: bound the EFFECTIVE executed price, derived in
+        // the core from actual net input and output. This covers quote decay
+        // and any strategy-level skew — the module's self-reported
+        // appliedPriceX128 is diagnostics only, never trusted for safety.
+        if (refPxX128 != 0) {
+            uint256 effectivePxX128 = token0In
+                ? Math.mulDiv(r.amountOut, Q128, r.netAmountIn)
+                : Math.mulDiv(r.netAmountIn, Q128, r.amountOut);
+            uint16 dev = oracleConfigs[bookId].maxDeviationBps;
+            uint256 minPx = Math.mulDiv(refPxX128, uint256(BPS) - dev, uint256(BPS));
+            uint256 maxPx = Math.mulDiv(refPxX128, uint256(BPS) + dev, uint256(BPS));
+            if (effectivePxX128 < minPx || effectivePxX128 > maxPx) {
+                return _invalid(r, QuoteReason.OracleDeviation);
+            }
+        }
+
         r.valid = true;
         r.reason = QuoteReason.OK;
     }
 
-    /// @dev Compares the undecayed quote midpoint against the scaled feed price.
-    ///      Returns a QuoteReason instead of reverting so the quoter stays
-    ///      non-reverting for aggregators.
-    function _checkOracle(OracleConfig storage oc, QuoteState storage q)
+    /// @dev Reads the feed and returns the scaled reference price. Returns a
+    ///      QuoteReason instead of reverting so the quoter stays non-reverting.
+    ///      Rejects zero/future feed timestamps; staleness uses subtraction to
+    ///      avoid any addition overflow.
+    function _oracleReference(OracleConfig storage oc)
         internal
         view
-        returns (QuoteReason)
+        returns (uint256 refPxX128, QuoteReason)
     {
         // roundId/startedAt/answeredInRound are unused by design; staleness is
         // enforced through updatedAt + maxAge instead of round accounting.
@@ -930,29 +1034,25 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         try AggregatorV3Interface(oc.feed).latestRoundData() returns (
             uint80, int256 answer, uint256, uint256 feedUpdatedAt, uint80
         ) {
-            if (answer <= 0) return QuoteReason.OracleInvalid;
-            if (block.timestamp > feedUpdatedAt + oc.maxAge) return QuoteReason.OracleStale;
+            if (answer <= 0) return (0, QuoteReason.OracleInvalid);
+            if (feedUpdatedAt == 0 || feedUpdatedAt > block.timestamp) {
+                return (0, QuoteReason.OracleInvalid);
+            }
+            if (block.timestamp - feedUpdatedAt > oc.maxAge) {
+                return (0, QuoteReason.OracleStale);
+            }
 
             // casting to 'uint256' is safe: answer > 0 was checked above
             // forge-lint: disable-next-line(unsafe-typecast)
             uint256 unsignedAnswer = uint256(answer);
             if (unsignedAnswer > type(uint256).max / oc.priceScale) {
-                return QuoteReason.OracleInvalid;
+                return (0, QuoteReason.OracleInvalid);
             }
-            uint256 refPxX128 = unsignedAnswer * oc.priceScale;
-            if (refPxX128 == 0) return QuoteReason.OracleInvalid;
-
-            // Half-then-add avoids overflow; the at-most-1 rounding loss is
-            // negligible against Q128 price magnitudes.
-            uint256 midPxX128 = q.bidPxX128 / 2 + q.askPxX128 / 2;
-            uint256 deviation =
-                midPxX128 > refPxX128 ? midPxX128 - refPxX128 : refPxX128 - midPxX128;
-            if (deviation > Math.mulDiv(refPxX128, oc.maxDeviationBps, BPS)) {
-                return QuoteReason.OracleDeviation;
-            }
-            return QuoteReason.OK;
+            refPxX128 = unsignedAnswer * oc.priceScale;
+            if (refPxX128 == 0) return (0, QuoteReason.OracleInvalid);
+            return (refPxX128, QuoteReason.OK);
         } catch {
-            return QuoteReason.OracleInvalid;
+            return (0, QuoteReason.OracleInvalid);
         }
     }
 
@@ -988,6 +1088,13 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         return uint160(a) < uint160(b)
             ? keccak256(abi.encodePacked(a, b))
             : keccak256(abi.encodePacked(b, a));
+    }
+
+    modifier onlyGroupOwner(bytes32 liquidityGroupId) {
+        LiquidityGroup storage g = liquidityGroups[liquidityGroupId];
+        if (!g.exists) revert InvalidGroup();
+        if (msg.sender != g.owner) revert NotGroupOwner();
+        _;
     }
 
     modifier onlyGroupOwnerOrProtocol(bytes32 liquidityGroupId) {

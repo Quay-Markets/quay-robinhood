@@ -77,12 +77,6 @@ contract SharedLiquidityTest is QuayTestBase {
         assertEq(uint8(r.reason), uint8(QuayTypes.QuoteReason.InsufficientLiquidity));
         assertEq(r.availableOut, usdcLeft);
 
-        // The theoretical price is still quotable and unchanged.
-        QuaySharedLiquidityAMM.QuoteResult memory priceOnly =
-            amm.quotePriceOnly(btcBook, address(cbbtc), 2e8);
-        assertTrue(priceOnly.valid);
-        assertEq(priceOnly.amountOut, 2 * 599e8);
-
         // A smaller size still fills at the same price.
         r = amm.quoteExactInput(btcBook, address(cbbtc), 1e8);
         assertTrue(r.valid);

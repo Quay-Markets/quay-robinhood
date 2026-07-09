@@ -60,9 +60,12 @@ export function quoteExactInput(i: QuoteInput): QuoteResult {
   if (i.nowSec > q.validUntil) return invalid(QuoteReason.QuoteExpired);
   if (i.strategyApproved === false) return invalid(QuoteReason.StrategyNotApproved);
 
+  // Oracle guard, part 1: resolve the reference before pricing.
+  let refPxX128 = 0n;
   if (i.oracle !== undefined) {
-    const reason = checkOracle(i.oracle, q, i.nowSec);
+    const [ref, reason] = oracleReference(i.oracle, i.nowSec);
     if (reason !== QuoteReason.OK) return invalid(reason);
+    refPxX128 = ref;
   }
 
   r.quoteNonce = q.nonce;
@@ -76,6 +79,19 @@ export function quoteExactInput(i: QuoteInput): QuoteResult {
   r.appliedDecayBps = s.appliedDecayBps;
 
   if (r.amountOut === 0n) return invalid(QuoteReason.ZeroOutput);
+
+  // Oracle guard, part 2: bound the EFFECTIVE executed price (covers decay
+  // and strategy skew), derived from actual net input and output.
+  if (refPxX128 !== 0n && i.oracle !== undefined) {
+    const effectivePxX128 = i.token0In
+      ? mulDiv(r.amountOut, Q128, r.netAmountIn)
+      : mulDiv(r.netAmountIn, Q128, r.amountOut);
+    const minPx = mulDiv(refPxX128, BPS - i.oracle.maxDeviationBps, BPS);
+    const maxPx = mulDiv(refPxX128, BPS + i.oracle.maxDeviationBps, BPS);
+    if (effectivePxX128 < minPx || effectivePxX128 > maxPx) {
+      return invalid(QuoteReason.OracleDeviation);
+    }
+  }
 
   r.availableOut = i.availableOut;
   if (r.amountOut > i.availableOut) return invalid(QuoteReason.InsufficientLiquidity);
@@ -106,15 +122,16 @@ function priceWithStrategy(i: QuoteInput, netAmountIn: bigint): StrategyOutcome 
   }
 }
 
-function checkOracle(o: NonNullable<QuoteInput['oracle']>, q: QuoteState, now: bigint): QuoteReasonCode {
-  if (o.answer <= 0n) return QuoteReason.OracleInvalid;
-  if (now > o.feedUpdatedAt + o.maxAge) return QuoteReason.OracleStale;
+function oracleReference(
+  o: NonNullable<QuoteInput['oracle']>,
+  now: bigint,
+): [bigint, QuoteReasonCode] {
+  if (o.answer <= 0n) return [0n, QuoteReason.OracleInvalid];
+  if (o.feedUpdatedAt === 0n || o.feedUpdatedAt > now) return [0n, QuoteReason.OracleInvalid];
+  if (now - o.feedUpdatedAt > o.maxAge) return [0n, QuoteReason.OracleStale];
   const refPxX128 = o.answer * o.priceScale;
-  if (refPxX128 === 0n) return QuoteReason.OracleInvalid;
-  const midPxX128 = q.bidPxX128 / 2n + q.askPxX128 / 2n;
-  const deviation = midPxX128 > refPxX128 ? midPxX128 - refPxX128 : refPxX128 - midPxX128;
-  if (deviation > mulDiv(refPxX128, o.maxDeviationBps, BPS)) return QuoteReason.OracleDeviation;
-  return QuoteReason.OK;
+  if (refPxX128 === 0n) return [0n, QuoteReason.OracleInvalid];
+  return [refPxX128, QuoteReason.OK];
 }
 
 /** Mirrors src/strategies/BBOStrategy.sol. */

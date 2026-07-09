@@ -98,6 +98,19 @@ Only Approved strategies can quote or back new books. Blocking or retiring a
 strategy instantly invalidates quotes (`StrategyNotApproved`) and reverts swaps
 on every book that uses it — but never locks liquidity: deposits, withdrawals,
 and quote updates keep working, so makers can always pull their inventory.
+An Approved module cannot be retired directly (live books depend on it); the
+owner must Block it first. Registration pins the module's `extcodehash` in
+`StrategyInfo` and the `StrategyRegistered` event so reviews are verifiable;
+proxy modules are rejected at review since a proxy keeps its codehash while
+swapping implementations. Approval policy for routed modules (enforced at
+review): source-verified, immutable, deterministic in chain state — no
+`tx.origin`/`block.coinbase`/`tx.gasprice`/`block.basefee`/`gasleft()`, no
+external calls on the quote path.
+
+Custody boundaries: `withdraw` is group-owner only — the protocol owner cannot
+move maker inventory (its only funds path is `withdrawProtocolFees`). Books can
+only be created on owner-allowlisted tokens (`setTokenAllowed`): canonical,
+hook-free ERC-20s with exact transfer semantics.
 
 ## Aggregator integration
 
@@ -130,9 +143,13 @@ increasing per-book quote nonce.
 ## Oracle guardrails
 
 `setBookOracle(bookId, feed, maxAge, maxDeviationBps, priceScale)` attaches an
-optional Chainlink-style sanity guard to a book. While attached, quoting requires
-a positive feed answer no older than `maxAge`, and the undecayed quote midpoint
-must stay within `maxDeviationBps` of `answer * priceScale`. Pick `priceScale`
+optional Chainlink-style sanity guard to a book. **Protocol-owner only** — the
+guard is a venue-level safety promise, so makers cannot loosen or disable it.
+While attached, quoting requires a positive feed answer with a sane timestamp
+(non-zero, not in the future, no older than `maxAge`), and the **effective
+executed price** — derived in the core from actual net input and output, so
+quote decay and any strategy skew are included — must stay within
+`maxDeviationBps` of `answer * priceScale` on both sides. Pick `priceScale`
 off-chain as `2^128 * 10^token1Decimals / (10^feedDecimals * 10^token0Decimals)`
 so the reference lands in the book's price units. Violations surface as
 `OracleInvalid`, `OracleStale`, or `OracleDeviation` quote reasons; swaps revert.

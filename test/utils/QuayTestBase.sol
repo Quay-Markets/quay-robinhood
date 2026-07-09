@@ -72,6 +72,11 @@ abstract contract QuayTestBase is Test {
         bbo = new BBOStrategy();
 
         vm.startPrank(protocolOwner);
+        amm.setTokenAllowed(address(weth), true);
+        amm.setTokenAllowed(address(usdc), true);
+        amm.setTokenAllowed(address(cbbtc), true);
+        amm.setTokenAllowed(address(math0), true);
+        amm.setTokenAllowed(address(math1), true);
         amm.registerStrategy(address(bbo));
         amm.setStrategyApproval(address(bbo), true);
         amm.createLiquidityGroup(GROUP_MAIN, maker);

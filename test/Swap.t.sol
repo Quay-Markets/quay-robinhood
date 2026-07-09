@@ -227,6 +227,9 @@ contract SwapTest is QuayTestBase {
         FeeOnTransferERC20 fot = new FeeOnTransferERC20(100); // 1% fee
         bytes32 groupId = keccak256("FOT_GROUP");
         vm.startPrank(protocolOwner);
+        // Allowlisted deliberately: proves the runtime exact-transfer check
+        // still rejects fee-on-transfer behavior even for listed tokens.
+        amm.setTokenAllowed(address(fot), true);
         amm.createLiquidityGroup(groupId, maker);
         bytes32 bookId = amm.createBook(
             address(fot), address(usdc), groupId, bytes32("FOT"), 0, address(bbo), updater
@@ -259,6 +262,7 @@ contract SwapTest is QuayTestBase {
         ReentrantERC20 rtk = new ReentrantERC20();
         bytes32 groupId = keccak256("RTK_GROUP");
         vm.startPrank(protocolOwner);
+        amm.setTokenAllowed(address(rtk), true);
         amm.createLiquidityGroup(groupId, maker);
         bytes32 bookId = amm.createBook(
             address(weth), address(rtk), groupId, bytes32("RTK"), 0, address(bbo), updater

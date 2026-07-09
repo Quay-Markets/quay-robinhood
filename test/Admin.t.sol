@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {QuayTestBase} from "test/utils/QuayTestBase.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
 import {QuayTypes} from "src/QuayTypes.sol";
+import {MockERC20} from "test/utils/MockERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract AdminTest is QuayTestBase {
@@ -244,6 +245,54 @@ contract AdminTest is QuayTestBase {
         vm.prank(maker);
         vm.expectRevert(QuaySharedLiquidityAMM.InvalidAddress.selector);
         amm.setUpdater(wethBook, address(0), true);
+    }
+
+    function test_GetActiveUpdaters_FiltersDeactivated() public {
+        address second = makeAddr("second");
+        vm.startPrank(maker);
+        amm.setUpdater(wethBook, second, true);
+        amm.setUpdater(wethBook, updater, false); // deactivate the original
+        vm.stopPrank();
+
+        // History keeps both; the active view shows only the live EOA.
+        assertEq(amm.getUpdaters(wethBook).length, 2);
+        address[] memory active = amm.getActiveUpdaters(wethBook);
+        assertEq(active.length, 1);
+        assertEq(active[0], second);
+    }
+
+    // ------------------------------------------------------------------
+    // Token allowlist
+    // ------------------------------------------------------------------
+
+    function test_SetTokenAllowed_OnlyOwnerAndRealContracts() public {
+        MockERC20 newToken = new MockERC20("New", "NEW", 18);
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, maker));
+        vm.prank(maker);
+        amm.setTokenAllowed(address(newToken), true);
+
+        vm.startPrank(protocolOwner);
+        vm.expectRevert(QuaySharedLiquidityAMM.InvalidAddress.selector);
+        amm.setTokenAllowed(address(0), true);
+        vm.expectRevert(QuaySharedLiquidityAMM.InvalidAddress.selector);
+        amm.setTokenAllowed(taker, true); // EOA, no code
+
+        vm.expectEmit(true, false, false, true, address(amm));
+        emit QuaySharedLiquidityAMM.TokenAllowedSet(address(newToken), true);
+        amm.setTokenAllowed(address(newToken), true);
+        vm.stopPrank();
+        assertTrue(amm.isTokenAllowed(address(newToken)));
+    }
+
+    function test_CreateBook_RevertTokenNotAllowed() public {
+        MockERC20 rogue = new MockERC20("Rogue", "RGE", 18);
+        vm.startPrank(protocolOwner);
+        vm.expectRevert(QuaySharedLiquidityAMM.TokenNotAllowed.selector);
+        amm.createBook(address(rogue), address(usdc), GROUP_MAIN, 0, 10, address(bbo), updater);
+        vm.expectRevert(QuaySharedLiquidityAMM.TokenNotAllowed.selector);
+        amm.createBook(address(weth), address(rogue), GROUP_MAIN, 0, 10, address(bbo), updater);
+        vm.stopPrank();
     }
 
     // ------------------------------------------------------------------

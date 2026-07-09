@@ -5,6 +5,7 @@ import {QuayTestBase} from "test/utils/QuayTestBase.sol";
 import {QuaySharedLiquidityAMM} from "src/QuaySharedLiquidityAMM.sol";
 import {QuayTypes} from "src/QuayTypes.sol";
 import {MockAggregatorV3} from "test/utils/MockAggregatorV3.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract OracleTest is QuayTestBase {
     MockAggregatorV3 internal feed;
@@ -19,7 +20,7 @@ contract OracleTest is QuayTestBase {
         super.setUp();
         feed = new MockAggregatorV3(8);
         feed.set(2000e8, block.timestamp); // matches the 1999/2001 quote mid
-        vm.prank(maker);
+        vm.prank(protocolOwner);
         amm.setBookOracle(wethBook, address(feed), MAX_AGE, DEV_BPS, PRICE_SCALE);
     }
 
@@ -27,8 +28,13 @@ contract OracleTest is QuayTestBase {
         return uint8(r.reason);
     }
 
+    function _setDeviation(uint16 devBps) internal {
+        vm.prank(protocolOwner);
+        amm.setBookOracle(wethBook, address(feed), MAX_AGE, devBps, PRICE_SCALE);
+    }
+
     // ------------------------------------------------------------------
-    // Guard behavior
+    // Guard behavior — bounds the EFFECTIVE executed price
     // ------------------------------------------------------------------
 
     function test_Oracle_FreshInRangeQuoteValid() public view {
@@ -40,7 +46,7 @@ contract OracleTest is QuayTestBase {
     }
 
     function test_Oracle_DeviationBlocksQuoteAndSwap() public {
-        // Feed says 2100, quote mid is 2000 -> ~4.76% > 1%.
+        // Feed says 2100; the taker's effective sell price is ~1999 -> 4.8% off.
         feed.set(2100e8, block.timestamp);
 
         QuaySharedLiquidityAMM.QuoteResult memory r =
@@ -63,25 +69,49 @@ contract OracleTest is QuayTestBase {
     }
 
     function test_Oracle_DeviationBoundary() public {
-        // 4.76% mid-vs-ref deviation: passes at 5% tolerance, fails at 4%.
+        // Effective sell price ~1999 vs ref 2100: deficit/ref = 4.8095%.
+        // Bound is ref * (1 - dev): passes from 481 bps up, rejects at 480.
         feed.set(2100e8, block.timestamp);
 
-        vm.prank(maker);
-        amm.setBookOracle(wethBook, address(feed), MAX_AGE, 500, PRICE_SCALE);
+        _setDeviation(500);
         assertTrue(amm.quoteExactInput(wethBook, address(weth), 1e18).valid);
 
-        vm.prank(maker);
-        amm.setBookOracle(wethBook, address(feed), MAX_AGE, 400, PRICE_SCALE);
+        _setDeviation(481);
+        assertTrue(amm.quoteExactInput(wethBook, address(weth), 1e18).valid);
+
+        _setDeviation(480);
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
         assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleDeviation));
+    }
 
-        // Deviation must be measured relative to the oracle reference, not the
-        // quote mid: diff/ref = 4.762%, diff/mid = 5.0%. At 4.80% tolerance the
-        // ref basis passes while a mid basis would reject.
-        vm.prank(maker);
-        amm.setBookOracle(wethBook, address(feed), MAX_AGE, 480, PRICE_SCALE);
+    function test_Oracle_DecayedExecutionPriceIsGuarded() public {
+        // The guard checks the executed price, not the posted mid: a decayed
+        // quote (300 bps at +5s) drops the effective sell price to ~1939,
+        // outside the 1% band around 2000, even though the posted mid is fine.
+        vm.warp(START + FRESH_SECONDS + 3);
+        feed.set(2000e8, block.timestamp);
+
+        QuaySharedLiquidityAMM.QuoteResult memory r =
+            amm.quoteExactInput(wethBook, address(weth), 1e18);
+        assertFalse(r.valid);
+        assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleDeviation));
+
+        // A wider band admits the decayed execution.
+        _setDeviation(400);
         assertTrue(amm.quoteExactInput(wethBook, address(weth), 1e18).valid);
+    }
+
+    function test_Oracle_GuardsBothSides() public {
+        // Selling token1: effective buy price ~2001 must stay under
+        // ref * (1 + dev). Feed at 1900 -> maxPx = 1919 -> reject.
+        feed.set(1900e8, block.timestamp);
+        QuaySharedLiquidityAMM.QuoteResult memory r =
+            amm.quoteExactInput(wethBook, address(usdc), 2001e6);
+        assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleDeviation));
+
+        feed.set(2000e8, block.timestamp);
+        assertTrue(amm.quoteExactInput(wethBook, address(usdc), 2001e6).valid);
     }
 
     function test_Oracle_StaleFeed() public {
@@ -94,6 +124,17 @@ contract OracleTest is QuayTestBase {
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
         assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleStale));
+    }
+
+    function test_Oracle_ZeroOrFutureTimestampInvalid() public {
+        feed.set(2000e8, 0);
+        QuaySharedLiquidityAMM.QuoteResult memory r =
+            amm.quoteExactInput(wethBook, address(weth), 1e18);
+        assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleInvalid));
+
+        feed.set(2000e8, block.timestamp + 1);
+        r = amm.quoteExactInput(wethBook, address(weth), 1e18);
+        assertEq(_reason(r), uint8(QuayTypes.QuoteReason.OracleInvalid));
     }
 
     function test_Oracle_NonPositiveAnswer() public {
@@ -130,13 +171,13 @@ contract OracleTest is QuayTestBase {
         feed.set(2100e8, block.timestamp);
         assertFalse(amm.quoteExactInput(wethBook, address(weth), 1e18).valid);
 
-        vm.prank(maker);
+        vm.prank(protocolOwner);
         amm.setBookOracle(wethBook, address(0), 0, 0, 0);
         assertTrue(amm.quoteExactInput(wethBook, address(weth), 1e18).valid);
     }
 
     // ------------------------------------------------------------------
-    // Config validation
+    // Config validation — protocol-owner only, makers cannot loosen
     // ------------------------------------------------------------------
 
     function test_SetBookOracle_EmitsAndStores() public {
@@ -154,14 +195,20 @@ contract OracleTest is QuayTestBase {
         assertEq(scale, PRICE_SCALE);
     }
 
-    function test_SetBookOracle_RevertStranger() public {
-        vm.prank(taker);
-        vm.expectRevert(QuaySharedLiquidityAMM.NotGroupOwner.selector);
-        amm.setBookOracle(wethBook, address(feed), MAX_AGE, DEV_BPS, PRICE_SCALE);
+    function test_SetBookOracle_MakerCannotTouchTheGuard() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, maker));
+        vm.prank(maker);
+        amm.setBookOracle(wethBook, address(0), 0, 0, 0);
+    }
+
+    function test_SetBookOracle_RevertUnknownBook() public {
+        vm.prank(protocolOwner);
+        vm.expectRevert(QuaySharedLiquidityAMM.InvalidBook.selector);
+        amm.setBookOracle(bytes32("nope"), address(feed), MAX_AGE, DEV_BPS, PRICE_SCALE);
     }
 
     function test_SetBookOracle_RevertBadParams() public {
-        vm.startPrank(maker);
+        vm.startPrank(protocolOwner);
         vm.expectRevert(QuaySharedLiquidityAMM.BadOracleConfig.selector);
         amm.setBookOracle(wethBook, address(feed), 0, DEV_BPS, PRICE_SCALE);
         vm.expectRevert(QuaySharedLiquidityAMM.BadOracleConfig.selector);

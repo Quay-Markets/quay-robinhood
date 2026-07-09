@@ -96,6 +96,14 @@ contract LiquidityTest is QuayTestBase {
         amm.withdraw(GROUP_MAIN, address(usdc), 1, taker);
     }
 
+    function test_Withdraw_ProtocolOwnerCannotTouchMakerInventory() public {
+        // Custody guarantee for makers: only the group owner moves inventory;
+        // the protocol owner's only funds path is withdrawProtocolFees.
+        vm.prank(protocolOwner);
+        vm.expectRevert(QuaySharedLiquidityAMM.NotGroupOwner.selector);
+        amm.withdraw(GROUP_MAIN, address(usdc), 1, protocolOwner);
+    }
+
     function test_Withdraw_RevertZeroArgs() public {
         vm.startPrank(maker);
         vm.expectRevert(QuaySharedLiquidityAMM.InvalidAddress.selector);

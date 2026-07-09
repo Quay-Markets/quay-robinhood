@@ -475,6 +475,25 @@ export const quayAbi = [
   },
   {
     "type": "function",
+    "name": "getActiveUpdaters",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "active",
+        "type": "address[]",
+        "internalType": "address[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "getAllBookIds",
     "inputs": [],
     "outputs": [
@@ -1219,6 +1238,25 @@ export const quayAbi = [
   },
   {
     "type": "function",
+    "name": "isTokenAllowed",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "isUpdater",
     "inputs": [
       {
@@ -1502,15 +1540,15 @@ export const quayAbi = [
   },
   {
     "type": "function",
-    "name": "quoteExactInput",
+    "name": "quoteBestExactInputPaged",
     "inputs": [
       {
-        "name": "bookId",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "name": "tokenIn",
+        "type": "address",
+        "internalType": "address"
       },
       {
-        "name": "tokenIn",
+        "name": "tokenOut",
         "type": "address",
         "internalType": "address"
       },
@@ -1518,11 +1556,21 @@ export const quayAbi = [
         "name": "amountIn",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "start",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "limit",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "outputs": [
       {
-        "name": "",
+        "name": "best",
         "type": "tuple",
         "internalType": "struct QuaySharedLiquidityAMM.QuoteResult",
         "components": [
@@ -1623,7 +1671,7 @@ export const quayAbi = [
   },
   {
     "type": "function",
-    "name": "quotePriceOnly",
+    "name": "quoteExactInput",
     "inputs": [
       {
         "name": "bookId",
@@ -1643,7 +1691,7 @@ export const quayAbi = [
     ],
     "outputs": [
       {
-        "name": "r",
+        "name": "",
         "type": "tuple",
         "internalType": "struct QuaySharedLiquidityAMM.QuoteResult",
         "components": [
@@ -1951,6 +1999,24 @@ export const quayAbi = [
   },
   {
     "type": "function",
+    "name": "setTokenAllowed",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "allowed",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setUpdater",
     "inputs": [
       {
@@ -1997,6 +2063,11 @@ export const quayAbi = [
         "name": "status",
         "type": "uint8",
         "internalType": "enum QuaySharedLiquidityAMM.StrategyStatus"
+      },
+      {
+        "name": "codehash",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "stateMutability": "view"
@@ -2638,6 +2709,12 @@ export const quayAbi = [
         "internalType": "bytes32"
       },
       {
+        "name": "updater",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
         "name": "nonce",
         "type": "uint64",
         "indexed": false,
@@ -2728,6 +2805,12 @@ export const quayAbi = [
         "type": "address",
         "indexed": true,
         "internalType": "address"
+      },
+      {
+        "name": "codehash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
       }
     ],
     "anonymous": false
@@ -2832,6 +2915,25 @@ export const quayAbi = [
         "type": "uint64",
         "indexed": false,
         "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TokenAllowedSet",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "allowed",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
       }
     ],
     "anonymous": false
@@ -3067,6 +3169,11 @@ export const quayAbi = [
   },
   {
     "type": "error",
+    "name": "StrategyApprovedError",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "StrategyNotApprovedError",
     "inputs": []
   },
@@ -3090,6 +3197,11 @@ export const quayAbi = [
         "internalType": "string"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "TokenNotAllowed",
+    "inputs": []
   },
   {
     "type": "error",

@@ -204,33 +204,20 @@ contract QuoteViewTest is QuayTestBase {
     }
 
     // ------------------------------------------------------------------
-    // quotePriceOnly
-    // ------------------------------------------------------------------
-
-    function test_QuotePriceOnly_MatchesQuoteWhenFillable() public view {
-        QuaySharedLiquidityAMM.QuoteResult memory a =
-            amm.quoteExactInput(wethBook, address(weth), 1e18);
-        QuaySharedLiquidityAMM.QuoteResult memory b =
-            amm.quotePriceOnly(wethBook, address(weth), 1e18);
-        assertEq(a.amountOut, b.amountOut);
-        assertEq(uint8(a.reason), uint8(b.reason));
-    }
-
-    function test_QuotePriceOnly_ShowsPriceDespiteInsufficientLiquidity() public {
-        vm.prank(maker);
-        amm.withdraw(GROUP_MAIN, address(usdc), 500_000e6 - 1000e6, maker);
-
-        QuaySharedLiquidityAMM.QuoteResult memory r =
-            amm.quotePriceOnly(wethBook, address(weth), 1e18);
-        assertTrue(r.valid);
-        assertGt(r.amountOut, 0);
-        assertEq(r.availableOut, 1000e6);
-        assertGt(r.amountOut, r.availableOut); // signals unfillable
-    }
-
-    // ------------------------------------------------------------------
     // Best-of and batch
     // ------------------------------------------------------------------
+
+    function test_QuoteBestExactInputPaged() public view {
+        // Single book in range: page [0,1) finds it, page past the end
+        // returns BookMissing instead of reverting.
+        QuaySharedLiquidityAMM.QuoteResult memory r =
+            amm.quoteBestExactInputPaged(address(weth), address(usdc), 1e18, 0, 1);
+        assertTrue(r.valid);
+        assertEq(r.bookId, wethBook);
+
+        r = amm.quoteBestExactInputPaged(address(weth), address(usdc), 1e18, 5, 10);
+        r.assertInvalid(QuayTypes.QuoteReason.BookMissing);
+    }
 
     function test_QuoteBestExactInput_PicksBestBook() public {
         // Second WETH/USDC book with zero fee and a better bid.

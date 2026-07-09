@@ -23,6 +23,9 @@ contract InvariantTest is Test {
         amm.setStrategyApproval(address(bbo), true);
         handler = new QuayHandler(amm, bbo);
 
+        for (uint256 i = 0; i < 3; i++) {
+            amm.setTokenAllowed(address(handler.tokens(i)), true);
+        }
         amm.createLiquidityGroup(handler.GROUP1(), address(handler));
         amm.createLiquidityGroup(handler.GROUP2(), address(handler));
         handler.createBooks(address(this));

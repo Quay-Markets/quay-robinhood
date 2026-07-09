@@ -39,15 +39,17 @@ contract StrategyTest is QuayTestBase {
 
     function test_RegisterStrategy_ByAuthor() public {
         address module = _newModule();
-        vm.expectEmit(true, true, false, true, address(amm));
-        emit QuaySharedLiquidityAMM.StrategyRegistered(module, author);
+        vm.expectEmit(true, true, true, true, address(amm));
+        emit QuaySharedLiquidityAMM.StrategyRegistered(module, author, module.codehash);
         vm.prank(author);
         amm.registerStrategy(module);
 
-        (address a, uint64 at, QuaySharedLiquidityAMM.StrategyStatus st) = amm.strategies(module);
+        (address a, uint64 at, QuaySharedLiquidityAMM.StrategyStatus st, bytes32 ch) =
+            amm.strategies(module);
         assertEq(a, author);
         assertEq(at, START);
         assertEq(uint8(st), uint8(QuaySharedLiquidityAMM.StrategyStatus.Registered));
+        assertEq(ch, module.codehash); // pins the reviewed bytecode
     }
 
     function test_RegisterStrategy_RevertStranger() public {
@@ -96,7 +98,7 @@ contract StrategyTest is QuayTestBase {
 
         vm.prank(author);
         amm.retireStrategy(module);
-        (,, QuaySharedLiquidityAMM.StrategyStatus st) = amm.strategies(module);
+        (,, QuaySharedLiquidityAMM.StrategyStatus st,) = amm.strategies(module);
         assertEq(uint8(st), uint8(QuaySharedLiquidityAMM.StrategyStatus.Retired));
 
         // Terminal: neither re-approval nor re-retirement is possible.
@@ -106,6 +108,27 @@ contract StrategyTest is QuayTestBase {
         vm.prank(author);
         vm.expectRevert(QuaySharedLiquidityAMM.StrategyRetiredError.selector);
         amm.retireStrategy(module);
+    }
+
+    function test_RetireStrategy_CannotRetireApproved() public {
+        // Live books depend on Approved modules: the owner must Block first
+        // (books can migrate) before retirement is possible.
+        address module = _newModule();
+        vm.prank(author);
+        amm.registerStrategy(module);
+        vm.prank(protocolOwner);
+        amm.setStrategyApproval(module, true);
+
+        vm.prank(author);
+        vm.expectRevert(QuaySharedLiquidityAMM.StrategyApprovedError.selector);
+        amm.retireStrategy(module);
+
+        vm.prank(protocolOwner);
+        amm.setStrategyApproval(module, false);
+        vm.prank(author);
+        amm.retireStrategy(module);
+        (,, QuaySharedLiquidityAMM.StrategyStatus st,) = amm.strategies(module);
+        assertEq(uint8(st), uint8(QuaySharedLiquidityAMM.StrategyStatus.Retired));
     }
 
     function test_CreateBook_RequiresApprovedStrategy() public {
@@ -188,8 +211,12 @@ contract StrategyTest is QuayTestBase {
     }
 
     function test_RetiredStrategy_KillsQuoting() public {
-        vm.prank(protocolOwner);
-        amm.retireStrategy(address(bbo)); // owner may retire on behalf of author
+        // Approved modules must be blocked before retirement (owner acts on
+        // behalf of the author here).
+        vm.startPrank(protocolOwner);
+        amm.setStrategyApproval(address(bbo), false);
+        amm.retireStrategy(address(bbo));
+        vm.stopPrank();
 
         QuaySharedLiquidityAMM.QuoteResult memory r =
             amm.quoteExactInput(wethBook, address(weth), 1e18);
