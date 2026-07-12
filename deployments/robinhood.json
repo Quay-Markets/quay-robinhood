@@ -1,0 +1,46 @@
+{
+  "chainId": 4663,
+  "chain": "Robinhood Chain mainnet",
+  "deployedAt": "2026-07-12",
+  "explorer": "https://robinhoodchain.blockscout.com",
+  "contracts": {
+    "QuaySharedLiquidityAMM": "0xFDB9f493e440028A15974EFb80ab57bb9fb06c6A",
+    "BBOStrategy": "0x03050D3242864eECfd7AB0a2b359e39022Ae401f"
+  },
+  "owner": "0x8D81Ee1f64bf16C8c8baf2e5208E9F57924c5490",
+  "strategies": {
+    "0x03050D3242864eECfd7AB0a2b359e39022Ae401f": {
+      "name": "BBOStrategy",
+      "status": "Approved",
+      "verified": true
+    }
+  },
+  "allowedTokens": {
+    "AAPL": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
+    "USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+  },
+  "liquidityGroups": {
+    "quay-maker-1": {
+      "groupId": "0xd9e9ec08b99aa09ad46348be89b434df11103d4127a74fd127a8c49cafdd6ae6",
+      "owner": "0x8D81Ee1f64bf16C8c8baf2e5208E9F57924c5490"
+    }
+  },
+  "books": {
+    "AAPL/USDG": {
+      "bookId": "0x729265593321452154cb96c88a3c5466a6e47b5b5c6f054fccf62a0e42fe7f55",
+      "token0": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
+      "token1": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "liquidityGroup": "quay-maker-1",
+      "strategy": "BBOStrategy",
+      "protocolFeeBps": 0,
+      "oracleGuard": "none (no Chainlink feed identified on-chain yet)",
+      "updaters": ["0x8D81Ee1f64bf16C8c8baf2e5208E9F57924c5490"],
+      "daemonConfig": "daemon/markets/aapl-usdg.json"
+    }
+  },
+  "notes": [
+    "Inventory not yet funded: deposit AAPL + USDG to the group to make quotes fillable.",
+    "Owner, group owner, and updater are all the deploy key for now — split roles before real operations.",
+    "First live quotes posted 2026-07-12 via daemon (Arcus price source), nonces 1-2."
+  ]
+}

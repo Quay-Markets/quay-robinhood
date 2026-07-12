@@ -1,7 +1,7 @@
 {
-  "comment": "AAPL/USDG on Robinhood Chain (4663). Set venue+bookId after running script/SetupMarket.s.sol.",
-  "venue": "0x0000000000000000000000000000000000000000",
-  "bookId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "comment": "AAPL/USDG on Robinhood Chain mainnet (4663), deployed 2026-07-12.",
+  "venue": "0xFDB9f493e440028A15974EFb80ab57bb9fb06c6A",
+  "bookId": "0x729265593321452154cb96c88a3c5466a6e47b5b5c6f054fccf62a0e42fe7f55",
   "stockSymbol": "AAPL",
   "stockToken": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
   "stockDecimals": 18,
