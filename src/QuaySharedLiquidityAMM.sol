@@ -191,6 +191,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
         bytes32 indexed bookId, BookStatus oldStatus, BookStatus newStatus, address indexed actor
     );
     event UpdaterSet(bytes32 indexed bookId, address indexed updater, bool active);
+    event QuoteUpdateSkipped(bytes32 indexed bookId, uint256 index);
     event BookOracleSet(
         bytes32 indexed bookId,
         address indexed feed,
@@ -584,6 +585,8 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
     }
 
     /// @notice Relay several signed quote updates in one transaction.
+    ///         Atomic: any invalid entry reverts the whole batch. Use this
+    ///         when all quotes come from one maker's daemon.
     function batchUpdateQuotesWithSig(
         bytes32[] calldata bookIds,
         QuoteState[] calldata quotes,
@@ -596,6 +599,35 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
             address signer = ECDSA.recover(hashQuoteUpdate(bookIds[i], quotes[i]), signatures[i]);
             if (!isUpdater[bookIds[i]][signer]) revert NotUpdater();
             _validateAndStoreQuote(bookIds[i], quotes[i], signer);
+        }
+    }
+
+    /// @notice Best-effort batch relay for a shared cranker submitting quotes
+    ///         signed by MANY independent makers: entries that fail (stale
+    ///         nonce, bad signer, closed book, ...) are skipped instead of
+    ///         reverting the batch, so one maker's bad quote cannot block the
+    ///         others. Authority stays per-book via each maker's EIP-712
+    ///         signature — the submitting account needs no trust at all.
+    function tryBatchUpdateQuotesWithSig(
+        bytes32[] calldata bookIds,
+        QuoteState[] calldata quotes,
+        bytes[] calldata signatures
+    ) external returns (bool[] memory applied) {
+        if (bookIds.length != quotes.length || bookIds.length != signatures.length) {
+            revert ArrayLengthMismatch();
+        }
+        applied = new bool[](bookIds.length);
+        for (uint256 i = 0; i < bookIds.length; i++) {
+            // External self-call so each entry's validation reverts are
+            // contained; other entries' state is unaffected. The callee is
+            // this contract itself, so no third party can reenter between
+            // the call and the skip event.
+            // slither-disable-next-line reentrancy-events,calls-loop
+            try this.updateQuoteWithSig(bookIds[i], quotes[i], signatures[i]) {
+                applied[i] = true;
+            } catch {
+                emit QuoteUpdateSkipped(bookIds[i], i);
+            }
         }
     }
 

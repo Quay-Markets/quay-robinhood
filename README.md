@@ -135,6 +135,14 @@ or revert, `minAmountOut` slippage bound, optional quote/inventory nonce pins.
 
 Updaters can push quotes directly (`updateQuote`) or sign an EIP-712 `QuoteUpdate`
 payload that anyone may relay (`updateQuoteWithSig`, `batchUpdateQuotesWithSig`).
+For a shared cranker submitting quotes signed by many independent makers,
+`tryBatchUpdateQuotesWithSig` is best-effort: bad entries are skipped (evented
+via `QuoteUpdateSkipped`) instead of reverting the batch, so one maker's stale
+quote cannot block the others. Authority stays per-book via each maker's
+signature — the submitting account is untrusted. See `test/StockMarket.t.sol`
+for the full stock-token recipe: Alpaca-fed quotes, protocol-set Chainlink
+guard on the executed price, market-close decay/expiry, and the shared-cranker
+flow.
 Domain: `name = "QuaySharedLiquidityAMM"`, `version = "1"`. The digest to sign is
 exactly `hashQuoteUpdate(bookId, quote)`; `updatedAt` is excluded because the
 contract stamps it with `block.timestamp`. Replay is blocked by the strictly

@@ -2153,6 +2153,92 @@ export const quayAbi = [
   },
   {
     "type": "function",
+    "name": "tryBatchUpdateQuotesWithSig",
+    "inputs": [
+      {
+        "name": "bookIds",
+        "type": "bytes32[]",
+        "internalType": "bytes32[]"
+      },
+      {
+        "name": "quotes",
+        "type": "tuple[]",
+        "internalType": "struct QuayTypes.QuoteState[]",
+        "components": [
+          {
+            "name": "nonce",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "updatedAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "freshUntil",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "validUntil",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "decayBpsPerSecond",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "maxDecayBps",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "bidPxX128",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "askPxX128",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxIn0",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxIn1",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "sourceHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      },
+      {
+        "name": "signatures",
+        "type": "bytes[]",
+        "internalType": "bytes[]"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "applied",
+        "type": "bool[]",
+        "internalType": "bool[]"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "unpause",
     "inputs": [],
     "outputs": [],
@@ -2691,6 +2777,25 @@ export const quayAbi = [
       },
       {
         "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "QuoteUpdateSkipped",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "index",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
