@@ -38,9 +38,14 @@
       "daemonConfig": "daemon/markets/aapl-usdg.json"
     }
   },
+  "ops": {
+    "MicroV4Swapper": "0xd777dc876a49567a568c2fe93d414060bd9b1743",
+    "swapperNote": "own v4 PoolManager swapper; the chain's unverified UniversalRouter reverts on ERC20-input v4 swaps"
+  },
   "notes": [
-    "Inventory not yet funded: deposit AAPL + USDG to the group to make quotes fillable.",
+    "Inventory funded 2026-07-12 via Uniswap v4 (ETH->USDG->AAPL, fee 500/ts 10 pools): ~0.0127 AAPL + ~4.07 USDG in group after first trade.",
+    "First real trade settled 2026-07-12: 1 USDG -> 0.003182 AAPL, tx 0xf6904b9fd245dd58f07273ef0df63d3c7b84b6229a193b7e6b36fa86afa07a27; on-chain quote matched settlement exactly.",
     "Owner, group owner, and updater are all the deploy key for now — split roles before real operations.",
-    "First live quotes posted 2026-07-12 via daemon (Arcus price source), nonces 1-2."
+    "First live quotes posted 2026-07-12 via daemon (Arcus price source)."
   ]
 }
