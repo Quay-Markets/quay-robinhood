@@ -1,5 +1,23 @@
 # Quay EVM Shared-Liquidity propAMM
 
+## Deployment — Robinhood Chain mainnet (chain 4663)
+
+Explorer: https://robinhoodchain.blockscout.com
+
+| Contract | Address |
+|---|---|
+| QuaySharedLiquidityAMM (venue) | [`0xFDB9f493e440028A15974EFb80ab57bb9fb06c6A`](https://robinhoodchain.blockscout.com/address/0xFDB9f493e440028A15974EFb80ab57bb9fb06c6A) |
+| BBOStrategy | [`0x03050D3242864eECfd7AB0a2b359e39022Ae401f`](https://robinhoodchain.blockscout.com/address/0x03050D3242864eECfd7AB0a2b359e39022Ae401f) |
+| MicroV4Swapper (ops) | [`0xd777dc876a49567a568c2fe93d414060bd9b1743`](https://robinhoodchain.blockscout.com/address/0xd777dc876a49567a568c2fe93d414060bd9b1743) |
+
+**AAPL/USDG market** — book id `0x729265593321452154cb96c88a3c5466a6e47b5b5c6f054fccf62a0e42fe7f55`,
+group id `0xd9e9ec08b99aa09ad46348be89b434df11103d4127a74fd127a8c49cafdd6ae6`
+(token0 AAPL `0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9`, token1 USDG
+`0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168`). Book and group ids are `bytes32`
+identifiers, not contract addresses. Full registry: `deployments/robinhood.json`.
+
+---
+
 Standalone hackathon design for Quay on an EVM chain.
 
 This version is designed around the aggregator feedback:
