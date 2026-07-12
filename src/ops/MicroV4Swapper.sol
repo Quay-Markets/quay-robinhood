@@ -94,15 +94,19 @@ contract MicroV4Swapper {
             ""
         );
 
-        // BalanceDelta packs (amount0 << 128 | amount1), both int128.
+        // BalanceDelta packs (amount0 << 128 | amount1) as two int128s; the
+        // truncating casts are the canonical Uniswap v4 unpacking.
+        // forge-lint: disable-start(unsafe-typecast)
         int128 amount0 = int128(delta >> 128);
         int128 amount1 = int128(delta);
         (address currencyIn, address currencyOut, int128 inDelta, int128 outDelta) = job.zeroForOne
             ? (job.key.currency0, job.key.currency1, amount0, amount1)
             : (job.key.currency1, job.key.currency0, amount1, amount0);
 
+        // input delta is negative (owed to the pool), output positive.
         uint256 owed = uint256(uint128(-inDelta));
         uint256 amountOut = uint256(uint128(outDelta));
+        // forge-lint: disable-end(unsafe-typecast)
         if (amountOut < job.minAmountOut) revert Slippage();
 
         // Pay the input. job.payer is always the swapExactInSingle caller:

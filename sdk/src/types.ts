@@ -48,48 +48,7 @@ export interface OracleInput {
   feedUpdatedAt: bigint;
 }
 
-export interface SolFiConfig {
-  rampSeconds: bigint;
-  maxAgeSeconds: bigint;
-  feePpm7: bigint;
-  c1Fresh: bigint;
-  c1Stale: bigint;
-  c0Fresh: bigint;
-  c0Stale: bigint;
-}
-
-export interface HumidiFiConfig {
-  circuitBreaker: bigint;
-  baseSpread: bigint;
-  sqrtDiv: bigint;
-  linDiv: bigint;
-  kickSpread: bigint;
-  maxSpread: bigint;
-  kickThreshold: bigint;
-}
-
-export interface BisonFiTier {
-  thresholdRatioPpm: bigint;
-  slopePpm: bigint; // signed
-  offsetPpm: bigint; // signed
-}
-
-export interface BisonFiConfig {
-  basePerSecond: bigint;
-  maxAgeSeconds: bigint;
-  defaultPick: bigint;
-  maxRatioPpm: bigint;
-  /** Side config for the direction being quoted. */
-  field: bigint;
-  floorValue: bigint;
-  ladder: BisonFiTier[];
-}
-
-export type StrategyInput =
-  | { kind: 'bbo' }
-  | { kind: 'solfi'; config: SolFiConfig }
-  | { kind: 'humidifi'; config: HumidiFiConfig }
-  | { kind: 'bisonfi'; config: BisonFiConfig };
+export type StrategyInput = { kind: 'bbo' };
 
 /** Everything needed to price one book off-chain — see loadBookState. */
 export interface QuoteInput {

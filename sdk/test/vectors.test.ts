@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { quoteExactInput } from '../src/quote.ts';
-import type { BisonFiTier, QuoteInput, StrategyInput } from '../src/types.ts';
+import type { QuoteInput, StrategyInput } from '../src/types.ts';
 
 /**
  * Parity contract: every vector in sdk/test-vectors.json was produced by the
@@ -14,7 +14,7 @@ import type { BisonFiTier, QuoteInput, StrategyInput } from '../src/types.ts';
 
 interface RawVector {
   name: string;
-  kind: 'bbo' | 'solfi' | 'humidifi' | 'bisonfi';
+  kind: 'bbo';
   token0In: boolean;
   amountIn: string;
   nowSec: string;
@@ -41,63 +41,12 @@ function big(v: unknown, field: string): bigint {
   return BigInt(v);
 }
 
-function strategyInput(v: RawVector): StrategyInput {
-  const c = v.config;
-  switch (v.kind) {
-    case 'bbo':
-      return { kind: 'bbo' };
-    case 'solfi':
-      return {
-        kind: 'solfi',
-        config: {
-          rampSeconds: big(c['rampSeconds'], 'rampSeconds'),
-          maxAgeSeconds: big(c['maxAgeSeconds'], 'maxAgeSeconds'),
-          feePpm7: big(c['feePpm7'], 'feePpm7'),
-          c1Fresh: big(c['c1Fresh'], 'c1Fresh'),
-          c1Stale: big(c['c1Stale'], 'c1Stale'),
-          c0Fresh: big(c['c0Fresh'], 'c0Fresh'),
-          c0Stale: big(c['c0Stale'], 'c0Stale'),
-        },
-      };
-    case 'humidifi':
-      return {
-        kind: 'humidifi',
-        config: {
-          circuitBreaker: big(c['circuitBreaker'], 'circuitBreaker'),
-          baseSpread: big(c['baseSpread'], 'baseSpread'),
-          sqrtDiv: big(c['sqrtDiv'], 'sqrtDiv'),
-          linDiv: big(c['linDiv'], 'linDiv'),
-          kickSpread: big(c['kickSpread'], 'kickSpread'),
-          maxSpread: big(c['maxSpread'], 'maxSpread'),
-          kickThreshold: big(c['kickThreshold'], 'kickThreshold'),
-        },
-      };
-    case 'bisonfi': {
-      const ladder = (c['ladder'] as Record<string, string>[]).map(
-        (t): BisonFiTier => ({
-          thresholdRatioPpm: big(t['thresholdRatioPpm'], 'thresholdRatioPpm'),
-          slopePpm: big(t['slopePpm'], 'slopePpm'),
-          offsetPpm: big(t['offsetPpm'], 'offsetPpm'),
-        }),
-      );
-      return {
-        kind: 'bisonfi',
-        config: {
-          basePerSecond: big(c['basePerSecond'], 'basePerSecond'),
-          maxAgeSeconds: big(c['maxAgeSeconds'], 'maxAgeSeconds'),
-          defaultPick: big(c['defaultPick'], 'defaultPick'),
-          maxRatioPpm: big(c['maxRatioPpm'], 'maxRatioPpm'),
-          field: big(c['field'], 'field'),
-          floorValue: big(c['floorValue'], 'floorValue'),
-          ladder,
-        },
-      };
-    }
-  }
+function strategyInput(_v: RawVector): StrategyInput {
+  return { kind: 'bbo' };
 }
 
 describe('SDK quote math matches Solidity bit-for-bit', () => {
-  expect(vectors.length).toBeGreaterThan(25);
+  expect(vectors.length).toBeGreaterThan(8);
 
   for (const v of vectors) {
     it(v.name, () => {

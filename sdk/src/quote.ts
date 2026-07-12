@@ -1,12 +1,9 @@
-import { BPS, PPB, PPM, PRECISION_1E7, Q128, SPREAD_DENOM, isqrt, mulDiv } from './math.ts';
+import { BPS, Q128, mulDiv } from './math.ts';
 import type {
-  BisonFiConfig,
-  HumidiFiConfig,
   QuoteInput,
   QuoteReasonCode,
   QuoteResult,
   QuoteState,
-  SolFiConfig,
 } from './types.ts';
 import { QuoteReason } from './types.ts';
 
@@ -102,24 +99,7 @@ export function quoteExactInput(i: QuoteInput): QuoteResult {
 }
 
 function priceWithStrategy(i: QuoteInput, netAmountIn: bigint): StrategyOutcome {
-  switch (i.strategy.kind) {
-    case 'bbo':
-      return bboQuote(i.quote, i.token0In, i.amountIn, netAmountIn, i.nowSec);
-    case 'solfi':
-      return solfiQuote(i.strategy.config, i.quote, i.token0In, i.amountIn, netAmountIn, i.nowSec);
-    case 'humidifi':
-      return humidifiQuote(i.strategy.config, i.quote, i.token0In, i.amountIn, netAmountIn);
-    case 'bisonfi':
-      return bisonfiQuote(
-        i.strategy.config,
-        i.quote,
-        i.token0In,
-        i.amountIn,
-        netAmountIn,
-        i.nowSec,
-        i.availableOut,
-      );
-  }
+  return bboQuote(i.quote, i.token0In, i.amountIn, netAmountIn, i.nowSec);
 }
 
 function oracleReference(
@@ -167,126 +147,3 @@ export function bboQuote(
   return { amountOut, appliedPriceX128, appliedDecayBps: decay, reason: QuoteReason.OK };
 }
 
-/** Mirrors src/strategies/SolFiStrategy.sol (slot-decay linear-C model). */
-export function solfiQuote(
-  c: SolFiConfig,
-  q: QuoteState,
-  token0In: boolean,
-  amountIn: bigint,
-  netAmountIn: bigint,
-  now: bigint,
-): StrategyOutcome {
-  const delta = now - q.updatedAt;
-  if (delta >= c.maxAgeSeconds) return rejected(QuoteReason.QuoteExpired);
-  if (token0In && amountIn > q.maxIn0) return rejected(QuoteReason.SizeExceeded);
-  if (!token0In && amountIn > q.maxIn1) return rejected(QuoteReason.SizeExceeded);
-  if (netAmountIn === 0n || q.bidPxX128 === 0n) return rejected(QuoteReason.ZeroOutput);
-
-  const clipped = delta > c.rampSeconds ? c.rampSeconds : delta;
-  const interp = (fresh: bigint, stale: bigint): bigint =>
-    (fresh * (c.rampSeconds - clipped) + stale * clipped) / c.rampSeconds;
-  const feeFactor = PRECISION_1E7 - c.feePpm7;
-
-  const amountOut = token0In
-    ? mulDiv(netAmountIn * feeFactor, q.bidPxX128, Q128 * interp(c.c0Fresh, c.c0Stale))
-    : mulDiv(
-        netAmountIn * feeFactor,
-        interp(c.c1Fresh, c.c1Stale) * Q128,
-        q.bidPxX128 * PRECISION_1E7 * PRECISION_1E7,
-      );
-  if (amountOut === 0n) return rejected(QuoteReason.ZeroOutput);
-
-  const appliedPriceX128 = token0In
-    ? mulDiv(amountOut, Q128, netAmountIn)
-    : mulDiv(netAmountIn, Q128, amountOut);
-  const appliedDecayBps = (clipped * 10_000n) / c.rampSeconds;
-  return { amountOut, appliedPriceX128, appliedDecayBps, reason: QuoteReason.OK };
-}
-
-/** Mirrors src/strategies/HumidiFiStrategy.sol. */
-export function humidifiQuote(
-  c: HumidiFiConfig,
-  q: QuoteState,
-  token0In: boolean,
-  amountIn: bigint,
-  netAmountIn: bigint,
-): StrategyOutcome {
-  if (c.circuitBreaker >= 100n) return rejected(QuoteReason.BookNotActive);
-  if (token0In && amountIn > q.maxIn0) return rejected(QuoteReason.SizeExceeded);
-  if (!token0In && amountIn > q.maxIn1) return rejected(QuoteReason.SizeExceeded);
-  if (netAmountIn === 0n) return rejected(QuoteReason.ZeroOutput);
-
-  const mid = q.bidPxX128;
-  if (mid === 0n) return rejected(QuoteReason.BadPrices);
-  const outPerfect = token0In ? mulDiv(netAmountIn, mid, Q128) : mulDiv(netAmountIn, Q128, mid);
-  if (outPerfect === 0n) return rejected(QuoteReason.ZeroOutput);
-
-  let spread = c.baseSpread;
-  if (c.sqrtDiv !== 0n) spread += isqrt(outPerfect / c.sqrtDiv);
-  if (c.linDiv !== 0n) spread += outPerfect / c.linDiv;
-  if (c.kickThreshold !== 0n && netAmountIn >= c.kickThreshold) spread += c.kickSpread;
-  if (spread > c.maxSpread) spread = c.maxSpread;
-
-  const factor = SPREAD_DENOM - spread;
-  const amountOut = token0In
-    ? mulDiv(netAmountIn * factor, mid, Q128 * SPREAD_DENOM)
-    : mulDiv(netAmountIn * factor, Q128, mid * SPREAD_DENOM);
-  if (amountOut === 0n) return rejected(QuoteReason.ZeroOutput);
-
-  const appliedPriceX128 = token0In
-    ? mulDiv(mid, factor, SPREAD_DENOM)
-    : mulDiv(mid, SPREAD_DENOM, factor);
-  return { amountOut, appliedPriceX128, appliedDecayBps: spread / 10_000n, reason: QuoteReason.OK };
-}
-
-/** Mirrors src/strategies/BisonFiStrategy.sol (June re-RE model). */
-export function bisonfiQuote(
-  c: BisonFiConfig,
-  q: QuoteState,
-  token0In: boolean,
-  amountIn: bigint,
-  netAmountIn: bigint,
-  now: bigint,
-  availableOut: bigint,
-): StrategyOutcome {
-  const age = now - q.updatedAt;
-  if (age >= c.maxAgeSeconds) return rejected(QuoteReason.QuoteExpired);
-  if (token0In && amountIn > q.maxIn0) return rejected(QuoteReason.SizeExceeded);
-  if (!token0In && amountIn > q.maxIn1) return rejected(QuoteReason.SizeExceeded);
-  if (netAmountIn === 0n || q.bidPxX128 === 0n) return rejected(QuoteReason.ZeroOutput);
-
-  const mid = q.bidPxX128;
-  const outPerfect = token0In ? mulDiv(netAmountIn, mid, Q128) : mulDiv(netAmountIn, Q128, mid);
-  if (outPerfect === 0n) return rejected(QuoteReason.ZeroOutput);
-
-  const depth = availableOut > 1n ? availableOut : 1n;
-  const ratioPpm = mulDiv(outPerfect, PPM, depth);
-  if (c.maxRatioPpm !== 0n && ratioPpm > c.maxRatioPpm) {
-    return rejected(QuoteReason.InsufficientLiquidity);
-  }
-
-  const basePick = c.floorValue !== 0n ? c.floorValue : c.defaultPick;
-  const pick = age >= 1n && c.field > basePick ? c.field : basePick;
-  const constantPpb = ((pick + age * c.basePerSecond) * 100_000n) / 256n;
-
-  let ladderPpm = 0n;
-  for (const t of c.ladder) {
-    if (ratioPpm < t.thresholdRatioPpm) break; // sorted ascending
-    ladderPpm += (t.slopePpm * (ratioPpm - t.thresholdRatioPpm)) / PPM + t.offsetPpm;
-  }
-
-  const totalPpb = constantPpb + ladderPpm * 1000n;
-  const factor = PPB - totalPpb;
-  if (factor <= 0n) return rejected(QuoteReason.InsufficientLiquidity);
-
-  const amountOut = token0In
-    ? mulDiv(netAmountIn * factor, mid, Q128 * PPB)
-    : mulDiv(netAmountIn * factor, Q128, mid * PPB);
-  if (amountOut === 0n) return rejected(QuoteReason.ZeroOutput);
-
-  const appliedPriceX128 = token0In ? mulDiv(mid, factor, PPB) : mulDiv(mid, PPB, factor);
-  let freshnessBps = ((age * c.basePerSecond * 100_000n) / 256n) / 100_000n;
-  const u32Max = 4_294_967_295n;
-  if (freshnessBps > u32Max) freshnessBps = u32Max;
-  return { amountOut, appliedPriceX128, appliedDecayBps: freshnessBps, reason: QuoteReason.OK };
-}

@@ -47,7 +47,7 @@ const r = quoteExactInput({
   protocolFeeBps: BigInt(v.book.protocolFeeBps),
   quote: v.quote,            // bigint-mapped QuoteState
   availableOut: v.inventory1,
-  strategy: { kind: 'bbo' }, // or solfi / humidifi / bisonfi + config
+  strategy: { kind: 'bbo' },
 });
 if (r.valid) route(r.amountOut);
 ```
@@ -57,10 +57,8 @@ the Foundry suite (`forge test --match-contract SdkVectorsTest`) directly from
 the deployed pipeline, and `pnpm test` replays all vectors through this
 package. If the SDK and the chain ever disagree, the vector tests fail.
 
-Strategy configs (SolFi C-constants, HumidiFi spread params, BisonFi ladders)
-are read from the strategy module's public getters; the book's
-`book.strategyModule` tells you which pricer applies. Config changes emit
-events — index them like quote updates.
+The book's `book.strategyModule` tells you which pricer applies; modules
+with per-book config expose public getters and emit config events.
 
 ## Swapping (the router call)
 
