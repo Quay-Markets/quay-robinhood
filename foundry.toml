@@ -5,7 +5,10 @@ libs = ["lib"]
 solc_version = "0.8.30"
 evm_version = "cancun"
 optimizer = true
-optimizer_runs = 10_000
+# runs=200 + via-ir keeps the venue under the EIP-170 24,576-byte limit
+# (31,055 bytes at runs=10k without IR).
+optimizer_runs = 200
+via_ir = true
 deny = "warnings"
 # Lets the SDK vector generator (test/SdkVectors.t.sol) refresh sdk/test-vectors.json
 fs_permissions = [{ access = "write", path = "./sdk/test-vectors.json" }]

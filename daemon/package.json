@@ -1,0 +1,23 @@
+{
+  "name": "@quay/quote-daemon",
+  "version": "0.1.0",
+  "description": "Quay quote updater daemon: polls a price source (Arcus router / Alpaca / fixed) and streams signed quotes to a venue book.",
+  "type": "module",
+  "license": "BUSL-1.1",
+  "engines": {
+    "node": ">=22.11"
+  },
+  "scripts": {
+    "start": "node src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src"
+  },
+  "dependencies": {
+    "viem": "2.55.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "oxlint": "1.73.0",
+    "typescript": "7.0.2"
+  }
+}

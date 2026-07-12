@@ -18,3 +18,7 @@ out/
 
 # SDK
 sdk/node_modules/
+daemon/node_modules/
+
+# Fork-smoke artifacts; real deployments recorded in deployments/
+broadcast/
