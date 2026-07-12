@@ -133,16 +133,31 @@ or revert, `minAmountOut` slippage bound, optional quote/inventory nonce pins.
 
 ## Signed quote updates
 
-Updaters can push quotes directly (`updateQuote`) or sign an EIP-712 `QuoteUpdate`
-payload that anyone may relay (`updateQuoteWithSig`, `batchUpdateQuotesWithSig`).
-For a shared cranker submitting quotes signed by many independent makers,
-`tryBatchUpdateQuotesWithSig` is best-effort: bad entries are skipped (evented
-via `QuoteUpdateSkipped`) instead of reverting the batch, so one maker's stale
-quote cannot block the others. Authority stays per-book via each maker's
-signature — the submitting account is untrusted. See `test/StockMarket.t.sol`
-for the full stock-token recipe: Alpaca-fed quotes, protocol-set Chainlink
-guard on the executed price, market-close decay/expiry, and the shared-cranker
-flow.
+Makers choose their quote-delivery lane per book; all lanes are freely mixed
+and all changes are per-book revocable:
+
+```text
+1. Self-hosted    updateQuote from the maker's own updater EOA. Full control,
+                  maker pays own gas, no venue involvement.
+2. Signed relay   maker signs EIP-712 QuoteUpdate payloads; ANY account relays
+                  (updateQuoteWithSig / batchUpdateQuotesWithSig atomic /
+                  tryBatchUpdateQuotesWithSig best-effort). Trustless: the
+                  submitter has no authority, replay blocked by nonces.
+3. Venue infra    maker authorizes a venue-operated cranker account via
+                  setUpdater(bookId, cranker, true); the cranker batches many
+                  makers' quotes with NO per-quote signatures
+                  (tryBatchUpdateQuotes) — the cheapest lane (~5k gas/quote
+                  saved vs signed relay: no 65-byte sig, no ecrecover), the
+                  Solana-style update squeeze.
+```
+
+Best-effort batches skip bad entries (stale nonce, revoked authorization,
+closed book) and emit `QuoteUpdateSkipped` instead of reverting, so one
+maker's problem never blocks the others — and the venue can run any number of
+cranker accounts in parallel: overlapping submissions degrade to harmless
+stale-nonce skips. See `test/StockMarket.t.sol` for the full stock-token
+recipe: Alpaca-fed quotes, protocol-set Chainlink guard on the executed price,
+market-close decay/expiry, and all three quote lanes exercised.
 Domain: `name = "QuaySharedLiquidityAMM"`, `version = "1"`. The digest to sign is
 exactly `hashQuoteUpdate(bookId, quote)`; `updatedAt` is excluded because the
 contract stamps it with `block.timestamp`. Replay is blocked by the strictly

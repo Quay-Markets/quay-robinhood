@@ -243,6 +243,100 @@ contract StockMarketTest is QuayTestBase {
         assertEq(amm.getQuoteState(bookB).nonce, 1); // B untouched
     }
 
+    // ------------------------------------------------------------------
+    // Venue-operated infra: makers OPT IN by authorizing the shared account
+    // as an updater — quotes then batch with no signatures at all
+    // ------------------------------------------------------------------
+
+    function test_SharedInfraAccount_UnsignedBatch() public {
+        // Both makers opt into the venue's cranker account.
+        vm.prank(makerA);
+        amm.setUpdater(bookA, cranker, true);
+        vm.prank(makerB);
+        amm.setUpdater(bookB, cranker, true);
+
+        bytes32[] memory ids = new bytes32[](2);
+        ids[0] = bookA;
+        ids[1] = bookB;
+        QuayTypes.QuoteState[] memory quotes = new QuayTypes.QuoteState[](2);
+        quotes[0] = _alpacaQuote(1, 190e6);
+        quotes[1] = _alpacaQuote(1, 190_050_000);
+
+        // One transaction, no signatures, no per-quote ecrecover.
+        vm.prank(cranker);
+        bool[] memory applied = amm.tryBatchUpdateQuotes(ids, quotes);
+        assertTrue(applied[0]);
+        assertTrue(applied[1]);
+        assertEq(amm.getQuoteState(bookA).nonce, 1);
+        assertEq(amm.getQuoteState(bookB).nonce, 1);
+
+        // Trading works off the infra-posted quote.
+        assertTrue(amm.quoteExactInput(bookA, address(usdg), 1_000e6).valid);
+    }
+
+    function test_SharedInfraAccount_OptInIsRevocablePerBook() public {
+        vm.prank(makerA);
+        amm.setUpdater(bookA, cranker, true);
+        vm.prank(makerB);
+        amm.setUpdater(bookB, cranker, true);
+
+        // Maker B leaves the shared infra (back to self-hosted quoting).
+        vm.prank(makerB);
+        amm.setUpdater(bookB, cranker, false);
+
+        bytes32[] memory ids = new bytes32[](2);
+        ids[0] = bookA;
+        ids[1] = bookB;
+        QuayTypes.QuoteState[] memory quotes = new QuayTypes.QuoteState[](2);
+        quotes[0] = _alpacaQuote(1, 190e6);
+        quotes[1] = _alpacaQuote(1, 190e6);
+
+        vm.expectEmit(true, false, false, true, address(amm));
+        emit QuaySharedLiquidityAMM.QuoteUpdateSkipped(bookB, 1);
+        vm.prank(cranker);
+        bool[] memory applied = amm.tryBatchUpdateQuotes(ids, quotes);
+        assertTrue(applied[0]); // A unaffected by B's exit
+        assertFalse(applied[1]);
+        assertEq(amm.getQuoteState(bookB).nonce, 0);
+
+        // B's own updater keeps working as before.
+        vm.prank(updaterB);
+        amm.updateQuote(bookB, _alpacaQuote(1, 190e6));
+        assertEq(amm.getQuoteState(bookB).nonce, 1);
+    }
+
+    function test_ManyCrankersScaleWithoutCoordination() public {
+        // Horizontal scaling: several venue cranker accounts submit in
+        // parallel lanes. Overlapping payloads degrade to stale-nonce skips,
+        // never reverts — no coordination needed between crankers.
+        address cranker2 = makeAddr("cranker2");
+        vm.startPrank(makerA);
+        amm.setUpdater(bookA, cranker, true);
+        amm.setUpdater(bookA, cranker2, true);
+        vm.stopPrank();
+
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = bookA;
+        QuayTypes.QuoteState[] memory quotes = new QuayTypes.QuoteState[](1);
+        quotes[0] = _alpacaQuote(1, 190e6);
+
+        vm.prank(cranker);
+        bool[] memory applied = amm.tryBatchUpdateQuotes(ids, quotes);
+        assertTrue(applied[0]);
+
+        // Cranker 2 lands the same tick a moment later: harmless skip.
+        vm.prank(cranker2);
+        applied = amm.tryBatchUpdateQuotes(ids, quotes);
+        assertFalse(applied[0]);
+        assertEq(amm.getQuoteState(bookA).nonce, 1);
+    }
+
+    function test_SelfStoreQuoteIsVenueOnly() public {
+        vm.prank(cranker);
+        vm.expectRevert(QuaySharedLiquidityAMM.NotSelf.selector);
+        amm.selfStoreQuote(bookA, _alpacaQuote(1, 190e6), cranker);
+    }
+
     function test_LenientBatchSkipsOneMakersBadQuote() public {
         vm.prank(updaterB);
         amm.updateQuote(bookB, _alpacaQuote(5, 190e6)); // B is already at nonce 5

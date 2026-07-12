@@ -1894,6 +1894,86 @@ export const quayAbi = [
   },
   {
     "type": "function",
+    "name": "selfStoreQuote",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "q",
+        "type": "tuple",
+        "internalType": "struct QuayTypes.QuoteState",
+        "components": [
+          {
+            "name": "nonce",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "updatedAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "freshUntil",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "validUntil",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "decayBpsPerSecond",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "maxDecayBps",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "bidPxX128",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "askPxX128",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxIn0",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxIn1",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "sourceHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      },
+      {
+        "name": "updater",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setBookOracle",
     "inputs": [
       {
@@ -2149,6 +2229,87 @@ export const quayAbi = [
       }
     ],
     "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "tryBatchUpdateQuotes",
+    "inputs": [
+      {
+        "name": "bookIds",
+        "type": "bytes32[]",
+        "internalType": "bytes32[]"
+      },
+      {
+        "name": "quotes",
+        "type": "tuple[]",
+        "internalType": "struct QuayTypes.QuoteState[]",
+        "components": [
+          {
+            "name": "nonce",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "updatedAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "freshUntil",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "validUntil",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "decayBpsPerSecond",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "maxDecayBps",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "bidPxX128",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "askPxX128",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxIn0",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxIn1",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "sourceHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "applied",
+        "type": "bool[]",
+        "internalType": "bool[]"
+      }
+    ],
     "stateMutability": "nonpayable"
   },
   {
@@ -3191,6 +3352,11 @@ export const quayAbi = [
   {
     "type": "error",
     "name": "NotGroupOwner",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotSelf",
     "inputs": []
   },
   {

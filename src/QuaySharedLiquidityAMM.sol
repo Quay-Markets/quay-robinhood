@@ -267,6 +267,7 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
     error BookClosed();
     error NotGroupOwner();
     error NotUpdater();
+    error NotSelf();
     error BadFee();
     error BadQuote();
     error BadOracleConfig();
@@ -629,6 +630,46 @@ contract QuaySharedLiquidityAMM is Ownable2Step, Pausable, ReentrancyGuard, EIP7
                 emit QuoteUpdateSkipped(bookIds[i], i);
             }
         }
+    }
+
+    /// @notice Cheapest shared-infra path: no signatures at all. Makers who
+    ///         opt into a venue-operated cranker authorize its account via
+    ///         setUpdater(bookId, cranker, true) — revocable per book at any
+    ///         time — and the cranker batches their quotes directly. Entries
+    ///         where msg.sender is not (or no longer) an authorized updater,
+    ///         or that fail validation, are skipped and evented, so makers
+    ///         joining/leaving the shared account never block each other.
+    ///         Run as many cranker accounts as throughput needs: overlapping
+    ///         submissions degrade to stale-nonce skips, never reverts.
+    function tryBatchUpdateQuotes(bytes32[] calldata bookIds, QuoteState[] calldata quotes)
+        external
+        returns (bool[] memory applied)
+    {
+        if (bookIds.length != quotes.length) revert ArrayLengthMismatch();
+        applied = new bool[](bookIds.length);
+        for (uint256 i = 0; i < bookIds.length; i++) {
+            if (!isUpdater[bookIds[i]][msg.sender]) {
+                emit QuoteUpdateSkipped(bookIds[i], i);
+                continue;
+            }
+            // External self-call so each entry's validation reverts are
+            // contained. Callee is this contract itself: no third-party
+            // reentry between the call and the skip event.
+            // slither-disable-next-line reentrancy-events,calls-loop
+            try this.selfStoreQuote(bookIds[i], quotes[i], msg.sender) {
+                applied[i] = true;
+            } catch {
+                emit QuoteUpdateSkipped(bookIds[i], i);
+            }
+        }
+    }
+
+    /// @notice Internal mechanics of tryBatchUpdateQuotes, exposed only so a
+    ///         self-call can contain per-entry reverts. Callable by the venue
+    ///         itself exclusively; authorization was checked by the caller.
+    function selfStoreQuote(bytes32 bookId, QuoteState calldata q, address updater) external {
+        if (msg.sender != address(this)) revert NotSelf();
+        _validateAndStoreQuote(bookId, q, updater);
     }
 
     /// @notice EIP-712 digest an updater must sign for updateQuoteWithSig.
